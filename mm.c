@@ -280,11 +280,6 @@ void *calloc(size_t elements, size_t size)
 
 /*
  * <what does extend_heap do?>
- * Extends the heap by size bytes, which may trigger coalesce().
- * Returns a pointer to the last free block.
- * 
- * Implementation:
- * Always repurposes the dummy epilogue into the header of the last free block
  */
 static block_t *extend_heap(size_t size) 
 {
@@ -311,81 +306,22 @@ static block_t *extend_heap(size_t size)
 
 /*
  * <what does coalesce do?>
- * Assumes that the passed block is free?
- * Merge with adjacent blocks if they are free
  */
 static block_t *coalesce(block_t * block) 
 {
-    
-
-    // 4 Possible Cases
-    size_t current_size = get_size(block);
-
-    block_t *prev_block = find_prev(block);
-    block_t *next_block = find_next(block);
-
-    // Edge cases? Consider at the ends
-    if (block == prev_block || block == next_block) 
-    {
-        return block;
-    }
-
-    bool prev_is_allocated = get_alloc(prev_block);
-    bool next_is_allocated = get_alloc(next_block);
-
-    if (prev_is_allocated && next_is_allocated) {
-        // No coalescing required.
-        return block;
-    } 
-    else if (prev_is_allocated && !next_is_allocated) 
-    {
-        // Coalesce with the next block
-        size_t next_size = get_size(next_block);
-        size_t new_size = current_size + next_size;
-        
-        // Create/Update header and footer
-        write_header(block, new_size, false);
-        write_footer(block, new_size, false);
-
-        return block;
-    }
-    else if (!prev_is_allocated && next_is_allocated) 
-    {
-        // Coalesce with the previous block
-        size_t prev_size = get_size(prev_block);
-        size_t new_size = current_size + prev_size;
-        
-        // Create/Update header and footer
-        write_header(prev_block, new_size, false);
-        write_footer(prev_block, new_size, false);
-
-        return prev_block;
-    }
-    else 
-    {
-        // Merge all 3 blocks
-        size_t prev_size = get_size(prev_block);
-        size_t next_size = get_size(next_block);
-        size_t new_size = prev_size + current_size + next_size;
-
-        // Create/Update header and footer
-        write_header(prev_block, new_size, false);
-        write_footer(prev_block, new_size, false);
-        return prev_block;
-    }
+    // fill me in
+    return block;
 }
 
 /*
  * <what does place do?>
- * Placing a block into a free block? It assumes that the parameter block is free
  */
 static void place(block_t *block, size_t asize)
 {
-    size_t csize = get_size(block);     // Current Size
+    size_t csize = get_size(block);
 
     if ((csize - asize) >= min_block_size)
     {
-        // Splitting
         block_t *block_next;
         write_header(block, asize, true);
         write_footer(block, asize, true);
@@ -397,7 +333,6 @@ static void place(block_t *block, size_t asize)
 
     else
     { 
-        // No splitting required
         write_header(block, csize, true);
         write_footer(block, csize, true);
     }
@@ -405,9 +340,6 @@ static void place(block_t *block, size_t asize)
 
 /*
  * <what does find_fit do?>
- * Finds a free block that can fit asize
- * 
- * Currently, first-fit implementation
  */
 static block_t *find_fit(size_t asize)
 {
