@@ -70,7 +70,6 @@ static const size_t min_block_size = 4*sizeof(word_t); // Minimum block size
 static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
-static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
 typedef struct block
@@ -104,7 +103,7 @@ static block_t *coalesce(block_t *block);
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
-static word_t pack(size_t size, bool prev_alloc, bool alloc);
+static word_t pack(size_t size, bool alloc);
 
 static size_t extract_size(word_t header);
 static size_t get_size(block_t *block);
@@ -113,8 +112,8 @@ static size_t get_payload_size(block_t *block);
 static bool extract_alloc(word_t header);
 static bool get_alloc(block_t *block);
 
-static void write_header(block_t *block, size_t size, bool prev_alloc, bool alloc);
-static void write_footer(block_t *block, size_t size, bool prev_alloc, bool alloc);
+static void write_header(block_t *block, size_t size, bool alloc);
+static void write_footer(block_t *block, size_t size, bool alloc);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -130,10 +129,20 @@ static block_t *find_prev(block_t *block);
 bool mm_init(void) 
 {
     // Create the initial empty heap 
-    heap_start = extend_heap(chunksize);
+    word_t *start = (word_t *)(mem_sbrk(2*wsize));
+
+    if (start == (void *)-1) 
+    {
+        return false;
+    }
+
+    start[0] = pack(0, true); // Prologue footer
+    start[1] = pack(0, true); // Epilogue header
+    // Heap starts with first "block header", currently the epilogue footer
+    heap_start = (block_t *) &(start[1]);
 
     // Extend the empty heap with a free block of chunksize bytes
-    if (heap_start == NULL)
+    if (extend_heap(chunksize) == NULL)
     {
         return false;
     }
@@ -456,18 +465,9 @@ static size_t round_up(size_t size, size_t n)
  * pack: returns a header reflecting a specified size and its alloc status.
  *       If the block is allocated, the lowest bit is set to 1, and 0 otherwise.
  */
-static word_t pack(size_t size, bool prev_alloc, bool alloc)
+static word_t pack(size_t size, bool alloc)
 {
-    word_t header = size;
-    if (prev_alloc)
-    {
-        header |= prev_alloc_mask;
-    }
-    if (alloc)
-    {
-        header |= alloc_mask;
-    }
-    return header;
+    return alloc ? (size | alloc_mask) : size;
 }
 
 
@@ -509,15 +509,6 @@ static bool extract_alloc(word_t word)
 }
 
 /*
- * extract_prev_alloc: returns the allocation status of the previous block by checking
- *                      the current block's header
- */
-static bool extract_prev_alloc(word_t word)
-{
-    return (bool)(word & prev_alloc_mask);
-}
-
-/*
  * get_alloc: returns true when the block is allocated based on the
  *            block header's lowest bit, and false otherwise.
  */
@@ -530,9 +521,9 @@ static bool get_alloc(block_t *block)
  * write_header: given a block and its size and allocation status,
  *               writes an appropriate value to the block header.
  */
-static void write_header(block_t *block, size_t size, bool prev_alloc, bool alloc)
+static void write_header(block_t *block, size_t size, bool alloc)
 {
-    block->header = pack(size, prev_alloc, alloc);
+    block->header = pack(size, alloc);
 }
 
 
@@ -541,10 +532,10 @@ static void write_header(block_t *block, size_t size, bool prev_alloc, bool allo
  *               writes an appropriate value to the block footer by first
  *               computing the position of the footer.
  */
-static void write_footer(block_t *block, size_t size, bool prev_alloc, bool alloc)
+static void write_footer(block_t *block, size_t size, bool alloc)
 {
     word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
-    *footerp = pack(size, prev_alloc, alloc);
+    *footerp = pack(size, alloc);
 }
 
 
