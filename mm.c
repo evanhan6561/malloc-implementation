@@ -234,7 +234,7 @@ void *malloc(size_t size)
     }
 
     // Adjust block size to include overhead and to meet alignment requirements
-    asize = round_up(size + dsize + dsize, dsize);
+    asize = round_up(size + dsize, dsize);
 
     // Search the free list for a fit
     block = find_fit(asize);
