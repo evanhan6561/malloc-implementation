@@ -393,16 +393,6 @@ static block_t *extend_heap(size_t size)
         remove_free_block(coalesce_ptr);
     }
 
-    // block_t *current = free_list.root;
-    // while (current != NULL) {
-    //     if (current == coalesce_ptr)
-    //     {
-    //         remove_free_block(coalesce_ptr);    
-    //         break;
-    //     }
-    //     current = current -> next;
-    // }
-
     return coalesce_ptr;
 }
 
