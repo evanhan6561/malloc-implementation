@@ -106,11 +106,9 @@ static void insert_free_block(block_t *block)
 {
     if (free_list.root == NULL)
     {
-        printf("Attempted to initialize null list\n");
         block->next = NULL;
         block->prev = NULL;
         free_list.root = block;
-        printf("First Root:%p\n", free_list.root);
         return;
     }
 
@@ -121,7 +119,6 @@ static void insert_free_block(block_t *block)
 
     // The inserted block is now the root
     free_list.root = block;
-    printf("New Root: %p\n", free_list.root);
 }
 
 // Removes a specified free block from freelist
@@ -143,11 +140,11 @@ static void remove_free_block(block_t *block)
     block_t *splice_block_next = block->next;
     block_t *splice_block_prev = block->prev;
 
-    if (splice_block_prev)
+    if (splice_block_prev != NULL)
     {
         splice_block_prev->next = splice_block_next;
     }
-    if (splice_block_next)
+    if (splice_block_next != NULL)
     {
         splice_block_next->prev = splice_block_prev;
     }
@@ -218,7 +215,7 @@ bool mm_init(void)
  */
 void *malloc(size_t size)
 {
-    printf("Malloc %lu\n", size);
+    dbg_printf("Malloc %lu\n", size);
     dbg_requires(mm_checkheap(__LINE__));
     size_t asize;      // Adjusted block size
     size_t extendsize; // Amount to extend heap if no fit is found
@@ -275,7 +272,7 @@ void free(void *bp)
     block_t *block = payload_to_header(bp);
     size_t size = get_size(block);
 
-    printf("Free %p\n", block);
+    dbg_printf("Free %p\n", block);
 
     write_header(block, size, false);
     write_footer(block, size, false);
@@ -289,7 +286,7 @@ void free(void *bp)
  */
 void *realloc(void *ptr, size_t size)
 {
-    printf("Realloc %p\n", ptr);
+    dbg_printf("Realloc %p\n", ptr);
     block_t *block = payload_to_header(ptr);
     size_t copysize;
     void *newptr;
@@ -334,7 +331,7 @@ void *realloc(void *ptr, size_t size)
  */
 void *calloc(size_t elements, size_t size)
 {
-    printf("Calloc %lu\n", size);
+    dbg_printf("Calloc %lu\n", size);
     void *bp;
     size_t asize = elements * size;
 
@@ -367,7 +364,7 @@ void *calloc(size_t elements, size_t size)
  */
 static block_t *extend_heap(size_t size)
 {
-    printf("Extend Heap!\n");
+    dbg_printf("Extend Heap!\n");
     void *bp;
 
     // Allocate an even number of words to maintain alignment
@@ -393,7 +390,17 @@ static block_t *extend_heap(size_t size)
     // So, don't insert in that case.
     
     block_t *coalesce_ptr = coalesce(block);
-    remove_free_block(coalesce_ptr);
+
+    // Only remove the block if it's found in the freelist
+    block_t *current = free_list.root;
+    while (current != NULL) {
+        if (current == coalesce_ptr)
+        {
+            remove_free_block(coalesce_ptr);    
+            break;
+        }
+        current = current -> next;
+    }
     return coalesce_ptr;
 }
 
@@ -414,24 +421,24 @@ static block_t *coalesce(block_t *block)
     bool prev_is_allocated = get_alloc(prev_block);
     bool next_is_allocated = get_alloc(next_block);
     if (block == next_block) {
-        printf("Coalesce at right edge of heap. %p\n", block);
+        dbg_printf("Coalesce at right edge of heap. %p\n", block);
         next_is_allocated = true;
     }
     if (block == prev_block) {
-        printf("Coalesce at left edge of heap. %p\n", block);
+        dbg_printf("Coalesce at left edge of heap. %p\n", block);
         prev_is_allocated = true;
     }
 
     if (prev_is_allocated && next_is_allocated)
     {
         // No coalescing required, but add to free_list
-        printf("No Coalesce\n");
+        dbg_printf("No Coalesce\n");
         return block;
     }
     else if (prev_is_allocated && !next_is_allocated)
     {
         // Coalesce with the next block
-        printf("Coalesce with next block\n");
+        dbg_printf("Coalesce with next block\n");
         size_t next_size = get_size(next_block);
         size_t new_size = current_size + next_size;
 
@@ -447,7 +454,7 @@ static block_t *coalesce(block_t *block)
     }
     else if (!prev_is_allocated && next_is_allocated)
     {
-        printf("Coalesce with previous\n");
+        dbg_printf("Coalesce with previous\n");
         // Coalesce with the previous block
         size_t prev_size = get_size(prev_block);
         size_t new_size = current_size + prev_size;
@@ -463,7 +470,7 @@ static block_t *coalesce(block_t *block)
     }
     else
     {
-        printf("Coalesce 3\n");
+        dbg_printf("Coalesce 3\n");
         // Merge all 3 blocks
         size_t prev_size = get_size(prev_block);
         size_t next_size = get_size(next_block);
@@ -546,8 +553,6 @@ static block_t *find_fit(size_t asize)
  */
 bool mm_checkheap(int line)
 {
-    printf("hello: %d\n", line);
-
     // Make sure it is doubly linked.
     block_t *current = free_list.root;
     while (current != NULL)
@@ -574,7 +579,7 @@ bool mm_checkheap(int line)
         current = current->next;
     }
 
-    // All free blocks? First iterate through freelist
+    // All free blocks? Mark each free block in the heap. Then make sure each block is marked
     int num_free_blocks_in_list = 0; // Start at 1 b/c I incr by 1, may not be correct
     current = free_list.root;
     if (current != NULL)
@@ -605,6 +610,9 @@ bool mm_checkheap(int line)
         printf("Free Blocks in List: %d\n", num_free_blocks_in_list);
         return false;
     }
+
+
+    // 
 
     return true;
 }

@@ -4,7 +4,7 @@
 CC = gcc
 
 # Change this to -O0 (big-Oh, numeral zero) if you need to use a debugger on your code
-COPT = -O0 # Change back to -O3 later
+COPT = -O3 # Change back to -O3 later
 CFLAGS = -Wall -Wextra -Werror $(COPT) -g -DDRIVER -Wno-unused-function -Wno-unused-parameter
 LIBS = -lm
 
