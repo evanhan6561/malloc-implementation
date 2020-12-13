@@ -374,33 +374,35 @@ static block_t *extend_heap(size_t size)
         return NULL;
     }
 
-    // Initialize free block header/footer and next/prev pointers
+    // Initialize free block header/footer
     block_t *block = payload_to_header(bp);
     write_header(block, size, false);
     write_footer(block, size, false);
-    // ? Should I write next/prev pointers here
 
     // Create new epilogue header
     block_t *block_next = find_next(block);
     write_header(block_next, 0, true);
 
     // Coalesce in case the previous block was free
-    // Edge Case: If we extendheap and merge all the way back to heap_start, 
-    // then we end up inserting the same free_block twice causing an infinite loop.
-    // So, don't insert in that case.
-    
     block_t *coalesce_ptr = coalesce(block);
 
     // Only remove the block if it's found in the freelist
-    block_t *current = free_list.root;
-    while (current != NULL) {
-        if (current == coalesce_ptr)
-        {
-            remove_free_block(coalesce_ptr);    
-            break;
-        }
-        current = current -> next;
+    block_t *block_prev = find_prev(block);
+    if (!get_alloc(block_prev))
+    {
+        remove_free_block(coalesce_ptr);
     }
+
+    // block_t *current = free_list.root;
+    // while (current != NULL) {
+    //     if (current == coalesce_ptr)
+    //     {
+    //         remove_free_block(coalesce_ptr);    
+    //         break;
+    //     }
+    //     current = current -> next;
+    // }
+
     return coalesce_ptr;
 }
 
@@ -529,7 +531,7 @@ static void place(block_t *block, size_t asize)
  * <what does find_fit do?>
  * Finds a free block that can fit asize
  * 
- * Currently, next-fit implementation
+ * Currently, Next-Fit implementation
  */
 static block_t *find_fit(size_t asize)
 {
