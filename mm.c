@@ -70,6 +70,7 @@ static const size_t min_block_size = 4 * sizeof(word_t); // Minimum block size
 static const size_t chunksize = (1 << 12);               // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
+static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
 typedef struct block block_t;
@@ -160,7 +161,7 @@ static block_t *coalesce(block_t *block);
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
-static word_t pack(size_t size, bool alloc);
+static word_t pack(size_t size, bool prev_alloc, bool alloc);
 
 static size_t extract_size(word_t header);
 static size_t get_size(block_t *block);
@@ -169,8 +170,8 @@ static size_t get_payload_size(block_t *block);
 static bool extract_alloc(word_t header);
 static bool get_alloc(block_t *block);
 
-static void write_header(block_t *block, size_t size, bool alloc);
-static void write_footer(block_t *block, size_t size, bool alloc);
+static void write_header(block_t *block, size_t size, bool prev_alloc, bool alloc);
+static void write_footer(block_t *block, size_t size, bool prev_alloc, bool alloc);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -180,6 +181,11 @@ static word_t *find_prev_footer(block_t *block);
 static block_t *find_prev(block_t *block);
 
 static void print_heap();
+static void print_free_list();
+
+static bool get_prev_alloc(block_t *block);
+static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc);
+static void write_prev_alloc(block_t* block, bool prev_alloc);
 
 /*
  * <what does mm_init do?>
@@ -194,15 +200,18 @@ bool mm_init(void)
         return false;
     }
 
-    start[0] = pack(0, true); // Prologue footer
-    start[1] = pack(0, true); // Epilogue header
+    start[0] = pack(0, true, true); // Prologue footer
+    start[1] = pack(0, false, true); // Epilogue header
     // Heap starts with first "block header", currently the epilogue footer
     heap_start = (block_t *)&(start[1]);
 
-    // Extend the heap and insert it into the freelist
-    insert_free_block(extend_heap(chunksize));
+    // Extend the empty heap and insert it into the freelist
+    block_t *first_ever_block = extend_heap(chunksize);
+    write_header(first_ever_block, get_size(first_ever_block), true, false);
+    write_footer(first_ever_block, get_size(first_ever_block), true, false);
 
-    // Extend the empty heap with a free block of chunksize bytes
+    insert_free_block(first_ever_block);
+
     if (free_list.root == NULL)
     {
         return false;
@@ -234,7 +243,7 @@ void *malloc(size_t size)
     }
 
     // Adjust block size to include overhead and to meet alignment requirements
-    asize = round_up(size + dsize, dsize);
+    asize = round_up(size + dsize, dsize);  // If we remove footer, +wsize instead of +dsize
 
     // Search the free list for a fit
     block = find_fit(asize);
@@ -274,8 +283,9 @@ void free(void *bp)
 
     dbg_printf("Free %p\n", block);
 
-    write_header(block, size, false);
-    write_footer(block, size, false);
+    bool old_prev_alloc = get_prev_alloc(block);
+    write_header(block, size, old_prev_alloc, false);
+    write_footer(block, size, old_prev_alloc, false);
 
     block_t *coalesce_ptr = coalesce(block);
     insert_free_block(coalesce_ptr);
@@ -376,19 +386,21 @@ static block_t *extend_heap(size_t size)
 
     // Initialize free block header/footer
     block_t *block = payload_to_header(bp);
-    write_header(block, size, false);
-    write_footer(block, size, false);
+    bool old_prev_alloc = get_prev_alloc(block);
+    write_header(block, size, old_prev_alloc, false);
+    write_footer(block, size, old_prev_alloc, false);
+
+    write_prev_alloc(block, old_prev_alloc);
 
     // Create new epilogue header
     block_t *block_next = find_next(block);
-    write_header(block_next, 0, true);
+    write_header(block_next, 0, false, true);
 
     // Coalesce in case the previous block was free
     block_t *coalesce_ptr = coalesce(block);
 
     // Only remove the block if it's found in the freelist
-    block_t *block_prev = find_prev(block);
-    if (!get_alloc(block_prev))
+    if (!old_prev_alloc)
     {
         remove_free_block(coalesce_ptr);
     }
@@ -406,25 +418,37 @@ static block_t *coalesce(block_t *block)
     // 4 Possible Cases
     size_t current_size = get_size(block);
 
-    block_t *prev_block = find_prev(block);
+    // block_t *prev_block = find_prev(block);
     block_t *next_block = find_next(block);
 
     // Edge cases? Consider at the ends
-    bool prev_is_allocated = get_alloc(prev_block);
+    bool prev_is_allocated = get_prev_alloc(block);
     bool next_is_allocated = get_alloc(next_block);
     if (block == next_block) {
         dbg_printf("Coalesce at right edge of heap. %p\n", block);
         next_is_allocated = true;
     }
-    if (block == prev_block) {
+
+
+    if (!prev_is_allocated)
+    {
+        if (block == find_prev(block)) {
         dbg_printf("Coalesce at left edge of heap. %p\n", block);
         prev_is_allocated = true;
+        }
     }
+    
 
     if (prev_is_allocated && next_is_allocated)
     {
         // No coalescing required, but add to free_list
         dbg_printf("No Coalesce\n");
+
+        // Copy header to footer
+        write_footer(block, get_size(block), get_prev_alloc(block), get_alloc(block));
+
+        // prev-alloc bit
+        write_prev_alloc_of_next_block(block, false);
         return block;
     }
     else if (prev_is_allocated && !next_is_allocated)
@@ -435,47 +459,55 @@ static block_t *coalesce(block_t *block)
         size_t new_size = current_size + next_size;
 
         // Create/Update header and footer
-        write_header(block, new_size, false);
-        write_footer(block, new_size, false);
+        bool old_prev_alloc = get_prev_alloc(block);
+        write_header(block, new_size, old_prev_alloc, false);
+        write_footer(block, new_size, old_prev_alloc, false);
 
         // Splice out the next block from free_list
         remove_free_block(next_block);
 
-        // Update free_list
+        write_prev_alloc_of_next_block(block, false); // Not necessary?
         return block;
     }
     else if (!prev_is_allocated && next_is_allocated)
     {
-        dbg_printf("Coalesce with previous\n");
+        dbg_printf("Coalesce with previous, block: %p\n", block);
         // Coalesce with the previous block
+        block_t *prev_block = find_prev(block);
         size_t prev_size = get_size(prev_block);
         size_t new_size = current_size + prev_size;
 
+        dbg_printf("prev-block: %p\n", prev_block);
         // Create/Update header and footer
-        write_header(prev_block, new_size, false);
-        write_footer(prev_block, new_size, false);
+        bool old_prev_alloc = get_prev_alloc(prev_block);
+        write_header(prev_block, new_size, old_prev_alloc, false);
+        write_footer(prev_block, new_size, old_prev_alloc, false);
 
         // Update free_list
         remove_free_block(prev_block);
 
+        write_prev_alloc_of_next_block(prev_block, false);
         return prev_block;
     }
     else
     {
         dbg_printf("Coalesce 3\n");
         // Merge all 3 blocks
+        block_t *prev_block = find_prev(block);
         size_t prev_size = get_size(prev_block);
         size_t next_size = get_size(next_block);
         size_t new_size = prev_size + current_size + next_size;
 
         // Create/Update header and footer
-        write_header(prev_block, new_size, false);
-        write_footer(prev_block, new_size, false);
+        bool old_prev_alloc = get_prev_alloc(prev_block);
+        write_header(prev_block, new_size, old_prev_alloc, false);
+        write_footer(prev_block, new_size, old_prev_alloc, false);
 
         // List Manipulation
         remove_free_block(next_block);
         remove_free_block(prev_block);
 
+        write_prev_alloc_of_next_block(prev_block, false);
         return prev_block;
     }
 }
@@ -487,6 +519,7 @@ static block_t *coalesce(block_t *block)
 static void place(block_t *block, size_t asize)
 {
     size_t csize = get_size(block); // Current Size
+    dbg_printf("Place this block: %p, csize: %zu, asize: %zu\n", block, csize, asize);
 
     if ((csize - asize) >= min_block_size)
     {
@@ -494,14 +527,16 @@ static void place(block_t *block, size_t asize)
         block_t *block_next;
 
         // Allocation, remove the free block
-        write_header(block, asize, true);
-        write_footer(block, asize, true);
+        bool old_prev_alloc = get_prev_alloc(block);
+        write_header(block, asize, old_prev_alloc, true);
+        // write_footer(block, asize, old_prev_alloc, true);
         remove_free_block(block);
 
+        
         // Construct and insert the leftover free block
         block_next = find_next(block);
-        write_header(block_next, csize - asize, false);
-        write_footer(block_next, csize - asize, false);
+        write_header(block_next, csize - asize, true, false);
+        write_footer(block_next, csize - asize, true, false);
 
         insert_free_block(block_next);
     }
@@ -512,8 +547,10 @@ static void place(block_t *block, size_t asize)
         remove_free_block(block);
 
         // Allocation
-        write_header(block, csize, true);
-        write_footer(block, csize, true);
+        bool old_prev_alloc = get_prev_alloc(block);
+        write_header(block, csize, old_prev_alloc, true);
+        // write_footer(block, csize, old_prev_alloc, true);
+        write_prev_alloc_of_next_block(block, true);
     }
 }
 
@@ -571,17 +608,14 @@ bool mm_checkheap(int line)
         current = current->next;
     }
 
-    // All free blocks? Mark each free block in the heap. Then make sure each block is marked
-    int num_free_blocks_in_list = 0; // Start at 1 b/c I incr by 1, may not be correct
+    // All free blocks? No mark system
+    int num_free_blocks_in_list = 0; 
     current = free_list.root;
-    if (current != NULL)
-    {
-        do
-        {
-            num_free_blocks_in_list++;
-            current = current->next;
-        } while (current != NULL);
+    while (current != NULL) {
+        current = current -> next;
+        num_free_blocks_in_list++;
     }
+    
 
     // Iterate through heap implicitly
     int num_free_blocks_in_heap = 0;
@@ -597,14 +631,40 @@ bool mm_checkheap(int line)
     if (num_free_blocks_in_heap != num_free_blocks_in_list)
     {
         print_heap();
+        print_free_list();
         printf("Mismatch b/n heap and list. Line: %d\n", line);
         printf("Free Blocks in Heap: %d\n", num_free_blocks_in_heap);
         printf("Free Blocks in List: %d\n", num_free_blocks_in_list);
         return false;
     }
 
+    /* Removing footer checks*/
+    // Check if prev_alloc is maintained
+    for (block = heap_start; get_size(find_next(block)) > 0; block = find_next(block))
+    {
+        if (get_alloc(block) != get_prev_alloc(find_next(block))) {
+            printf("Prev-Alloc bit mismatch.\n");
+            print_heap();
+            return false;
+        }
+    }
 
-    // 
+    // Check if a free block's header == footer
+    for (block = heap_start; get_size(block) > 0; block = find_next(block))
+    {
+        if (!get_alloc(block)) {
+            // Only for free blocks
+            word_t header = block -> header;
+            word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
+            word_t footer = *footerp;
+
+            if (header != footer) {
+                printf("Footer and Header of free block don't match.\n");
+                print_heap();
+                return false;
+            }
+        }
+    }
 
     return true;
 }
@@ -629,9 +689,9 @@ static size_t round_up(size_t size, size_t n)
  * pack: returns a header reflecting a specified size and its alloc status.
  *       If the block is allocated, the lowest bit is set to 1, and 0 otherwise.
  */
-static word_t pack(size_t size, bool alloc)
+static word_t pack(size_t size, bool prev_alloc, bool alloc)
 {
-    return alloc ? (size | alloc_mask) : size;
+    return size | (prev_alloc << 1) | alloc;
 }
 
 /*
@@ -684,9 +744,9 @@ static bool get_alloc(block_t *block)
  * write_header: given a block and its size and allocation status,
  *               writes an appropriate value to the block header.
  */
-static void write_header(block_t *block, size_t size, bool alloc)
+static void write_header(block_t *block, size_t size, bool prev_alloc, bool alloc)
 {
-    block->header = pack(size, alloc);
+    block->header = pack(size, prev_alloc, alloc);
 }
 
 /*
@@ -694,10 +754,10 @@ static void write_header(block_t *block, size_t size, bool alloc)
  *               writes an appropriate value to the block footer by first
  *               computing the position of the footer.
  */
-static void write_footer(block_t *block, size_t size, bool alloc)
+static void write_footer(block_t *block, size_t size, bool prev_alloc, bool alloc)
 {
     word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
-    *footerp = pack(size, alloc);
+    *footerp = pack(size, prev_alloc, alloc);
 }
 
 
@@ -758,13 +818,13 @@ static void print_block(block_t *block)
 {
     if (!get_alloc(block))
     {
-        printf("[Addr: %p, Size: %lu, Alloc: %u| next: %p, prev: %p]\n",
-               block, get_size(block), get_alloc(block), block->next, block->prev);
+        printf("[Addr: %p, Size: %lu, PrevAlloc: %u, Alloc: %u| next: %p, prev: %p]\n",
+               block, get_size(block), get_prev_alloc(block),get_alloc(block), block->next, block->prev);
     }
     else
     {
-        printf("[Addr: %p, Size: %lu, Alloc: %u]\n",
-               block, get_size(block), get_alloc(block));
+        printf("[Addr: %p, Size: %lu, PrevAlloc: %u, Alloc: %u]\n",
+               block, get_size(block), get_prev_alloc(block), get_alloc(block));
     }
 }
 static void print_heap()
@@ -775,4 +835,31 @@ static void print_heap()
     {
         print_block(block);
     }
+}
+static void print_free_list()
+{
+    printf("FREELIST DUMP vvv\n");
+    block_t *current = free_list.root;
+    while (current != NULL){
+        print_block(current);
+        current = current->next;
+    }
+}
+
+// Returns the prev_alloc bit of a block
+static bool get_prev_alloc(block_t *block)
+{
+    return (bool) !!(block->header & prev_alloc_mask);
+}
+
+static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc)
+{
+    block_t *next_block = find_next(block);
+    word_t new_header = pack(get_size(next_block), prev_alloc, get_alloc(next_block));
+    next_block->header = new_header;
+}
+
+static void write_prev_alloc(block_t* block, bool prev_alloc)
+{
+    block->header = get_size(block) | (prev_alloc << 1) | get_alloc(block);
 }
