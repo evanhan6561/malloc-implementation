@@ -243,8 +243,10 @@ void *malloc(size_t size)
     }
 
     // Adjust block size to include overhead and to meet alignment requirements
-    asize = round_up(size + dsize, dsize);  // If we remove footer, +wsize instead of +dsize
-
+    asize = round_up(size + wsize, dsize);  // If we remove footer, +wsize instead of +dsize
+    if (asize < min_block_size) {
+        asize = min_block_size;
+    }
     // Search the free list for a fit
     block = find_fit(asize);
 
@@ -528,9 +530,9 @@ static void place(block_t *block, size_t asize)
 
         // Allocation, remove the free block
         bool old_prev_alloc = get_prev_alloc(block);
+        remove_free_block(block);
         write_header(block, asize, old_prev_alloc, true);
         // write_footer(block, asize, old_prev_alloc, true);
-        remove_free_block(block);
 
         
         // Construct and insert the leftover free block
@@ -719,7 +721,7 @@ static size_t get_size(block_t *block)
 static word_t get_payload_size(block_t *block)
 {
     size_t asize = get_size(block);
-    return asize - dsize;
+    return asize - wsize;
 }
 
 /*
