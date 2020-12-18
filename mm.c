@@ -101,10 +101,10 @@ struct block
 };
 
 // Non-circular Doubly Linked List, LIFO
-typedef struct FreeList
-{
-    block_t *root;
-} FreeList;
+// typedef struct FreeList
+// {
+//     block_t *root;
+// } FreeList;
 
 
 // Segregated Lists, our global list will be the MEGA_BLOCK holder
@@ -119,7 +119,7 @@ typedef struct Bins
 /* Global variables */
 /* Pointer to first block */
 static block_t *heap_start = NULL;  // Start of heap
-static FreeList free_list = {NULL}; // Doubly Linked List of all free_blocks
+static block_t *free_list = NULL; // Doubly Linked List of all free_blocks
 static Bins *bins = NULL;    // Pointers to segregated lists
 
 
@@ -167,6 +167,9 @@ static bool is_small(block_t *block);
 static bool is_large(block_t *block);
 static int small_idx(block_t *block);
 static int large_idx(block_t *block);
+void small_bin_insert(block_t *block);
+void large_bin_insert(block_t *block);
+void list_insert(block_t *root, block_t *block);
 
 /*
  * <what does mm_init do?>
@@ -212,7 +215,7 @@ bool mm_init(void)
 
     insert_free_block(first_ever_block);
 
-    if (free_list.root == NULL)
+    if (free_list == NULL)
     {
         return false;
     }
@@ -564,7 +567,7 @@ static void place(block_t *block, size_t asize)
  */
 static block_t *find_fit(size_t asize)
 {
-    block_t *block = free_list.root;
+    block_t *block = free_list;
 
     while (block != NULL)
     {
@@ -585,7 +588,7 @@ static block_t *find_fit(size_t asize)
 bool mm_checkheap(int line)
 {
     // Make sure it is doubly linked.
-    block_t *current = free_list.root;
+    block_t *current = free_list;
     while (current != NULL)
     {
         if (current->next && current != current->next->prev)
@@ -598,7 +601,7 @@ bool mm_checkheap(int line)
     }
 
     // Make sure all blocks in the freelist are actually free
-    current = free_list.root;
+    current = free_list;
     while (current != NULL)
     {
         if (get_alloc(current))
@@ -612,7 +615,7 @@ bool mm_checkheap(int line)
 
     // All free blocks? No mark system
     int num_free_blocks_in_list = 0; 
-    current = free_list.root;
+    current = free_list;
     while (current != NULL) {
         current = current -> next;
         num_free_blocks_in_list++;
@@ -841,7 +844,7 @@ static void print_heap()
 static void print_free_list()
 {
     printf("FREELIST DUMP vvv\n");
-    block_t *current = free_list.root;
+    block_t *current = free_list;
     while (current != NULL){
         print_block(current);
         current = current->next;
@@ -850,37 +853,37 @@ static void print_free_list()
 
 static void insert_free_block(block_t *block)
 {
-    if (free_list.root == NULL)
+    if (free_list == NULL)
     {
         block->next = NULL;
         block->prev = NULL;
-        free_list.root = block;
+        free_list = block;
         return;
     }
 
     // Non-circular doubly linked insertion
-    block->next = free_list.root;
+    block->next = free_list;
     block->prev = NULL;
-    free_list.root->prev = block;
+    free_list->prev = block;
 
     // The inserted block is now the root
-    free_list.root = block;
+    free_list = block;
 }
 
 // Removes a specified free block from freelist
 static void remove_free_block(block_t *block)
 {
     // If only a single node, remove it.
-    if (free_list.root == block && free_list.root->prev == free_list.root && free_list.root->next == free_list.root)
+    if (free_list == block && free_list->prev == free_list && free_list->next == free_list)
     {
-        free_list.root = NULL;
+        free_list = NULL;
         return;
     }
 
     // If we are removing the root, change the root.
-    if (free_list.root == block)
+    if (free_list == block)
     {
-        free_list.root = free_list.root->next;
+        free_list = free_list->next;
     }
 
     block_t *splice_block_next = block->next;
@@ -936,3 +939,16 @@ static int large_idx(block_t *block)
     size_t size = get_size(block);
     return (size - MIN_SMALL_BIN_SIZE) / LARGE_BIN_RANGE;
 }
+
+// void small_bin_insert(block_t *block)
+// {
+//     int small_list_idx = small_idx(block);
+//     bins->small_bins[small_list_idx];
+    
+// }
+
+// void large_bin_insert(block_t *block)
+// {
+
+// }
+
