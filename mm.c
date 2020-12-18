@@ -75,8 +75,8 @@ static const word_t size_mask = ~(word_t)0xF;
 
 #define NUM_SMALL_BINS 256
 #define NUM_LARGE_BINS 256
-#define LARGE_BIN_RANGE 64  // The range a large bin covers
-static size_t MIN_SMALL_BIN_SIZE; 
+#define LARGE_BIN_RANGE 64 // The range a large bin covers
+static size_t MIN_SMALL_BIN_SIZE;
 static size_t MAX_SMALL_BIN_SIZE;
 static size_t MIN_LARGE_BIN_SIZE;
 static size_t MAX_LARGE_BIN_SIZE;
@@ -106,7 +106,6 @@ typedef struct FreeList
     block_t *root;
 } FreeList;
 
-
 // Segregated Lists, our global list will be the MEGA_BLOCK holder
 typedef struct Bins
 {
@@ -114,15 +113,11 @@ typedef struct Bins
     block_t *large_bins[NUM_LARGE_BINS];
 } Bins;
 
-
-
 /* Global variables */
 /* Pointer to first block */
-static block_t *heap_start = NULL;  // Start of heap
-static block_t **free_list = NULL; // Doubly Linked List of all free_blocks
-static Bins *bins = NULL;    // Pointers to segregated lists
-
-
+static block_t *heap_start = NULL; // Start of heap
+static block_t **mega_list = NULL; // Doubly Linked List of all free_blocks
+static Bins *bins = NULL;          // Pointers to segregated lists
 
 bool mm_checkheap(int lineno);
 
@@ -158,18 +153,18 @@ static void print_free_list();
 
 static bool get_prev_alloc(block_t *block);
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc);
-static void write_prev_alloc(block_t* block, bool prev_alloc);
+static void write_prev_alloc(block_t *block, bool prev_alloc);
 
-static void insert_free_block(block_t **list, block_t *block);
-static void remove_free_block(block_t **list, block_t *block);
+static void insert_free_block(block_t **list, block_t *block); // Helper function
+static void remove_free_block(block_t **list, block_t *block); // Helper function
 
-static bool is_small(block_t *block);
-static bool is_large(block_t *block);
-static int small_idx(block_t *block);
-static int large_idx(block_t *block);
-void small_bin_insert(block_t *block);
-void large_bin_insert(block_t *block);
-void list_insert(block_t *root, block_t *block);
+static bool is_small(size_t size);
+static bool is_large(size_t size);
+static size_t small_idx(size_t size);
+static size_t large_idx(size_t size);
+static void small_bin_insert(block_t *block);
+static void large_bin_insert(block_t *block);
+static void insert(block_t **list, block_t *block); // Inserts into a block into some seg list
 
 /*
  * <what does mm_init do?>
@@ -177,25 +172,24 @@ void list_insert(block_t *root, block_t *block);
 bool mm_init(void)
 {
     // Initialize Static Global Variables.
-    MIN_SMALL_BIN_SIZE = min_block_size; 
+    MIN_SMALL_BIN_SIZE = min_block_size;
     MAX_SMALL_BIN_SIZE = MIN_SMALL_BIN_SIZE + (NUM_SMALL_BINS - 1) * dsize;
     MIN_LARGE_BIN_SIZE = MAX_SMALL_BIN_SIZE + dsize;
     MAX_LARGE_BIN_SIZE = MIN_LARGE_BIN_SIZE + (NUM_LARGE_BINS - 1) * LARGE_BIN_RANGE;
 
     // Allocate and zero initialize bins
-    bins = (Bins *) mem_sbrk(sizeof(Bins));
+    bins = (Bins *)mem_sbrk(sizeof(Bins));
     size_t i;
     for (i = 0; i < NUM_SMALL_BINS; i++)
     {
-        bins -> small_bins[i] = NULL;
+        bins->small_bins[i] = NULL;
     }
     for (i = 0; i < NUM_LARGE_BINS; i++)
     {
-        bins -> large_bins[i] = NULL;
+        bins->large_bins[i] = NULL;
     }
 
-    free_list = (block_t **) mem_sbrk(dsize);
-    
+    mega_list = (block_t **)mem_sbrk(dsize);
 
     // Create the initial empty heap
     word_t *start = (word_t *)(mem_sbrk(2 * wsize));
@@ -205,7 +199,7 @@ bool mm_init(void)
         return false;
     }
 
-    start[0] = pack(0, true, true); // Prologue footer
+    start[0] = pack(0, true, true);  // Prologue footer
     start[1] = pack(0, false, true); // Epilogue header
     // Heap starts with first "block header", currently the epilogue footer
     heap_start = (block_t *)&(start[1]);
@@ -215,9 +209,9 @@ bool mm_init(void)
     write_header(first_ever_block, get_size(first_ever_block), true, false);
     write_footer(first_ever_block, get_size(first_ever_block), true, false);
 
-    insert_free_block(free_list, first_ever_block);
+    insert_free_block(mega_list, first_ever_block);
 
-    if (*free_list == NULL)
+    if (*mega_list == NULL)
     {
         printf("L\n");
         return false;
@@ -249,8 +243,9 @@ void *malloc(size_t size)
     }
 
     // Adjust block size to include overhead and to meet alignment requirements
-    asize = round_up(size + wsize, dsize);  // If we remove footer, +wsize instead of +dsize
-    if (asize < min_block_size) {
+    asize = round_up(size + wsize, dsize); // If we remove footer, +wsize instead of +dsize
+    if (asize < min_block_size)
+    {
         asize = min_block_size;
     }
     // Search the free list for a fit
@@ -265,7 +260,7 @@ void *malloc(size_t size)
         {
             return bp;
         }
-        insert_free_block(free_list, block);
+        insert_free_block(mega_list, block);
     }
 
     place(block, asize);
@@ -285,7 +280,6 @@ void free(void *bp)
         return;
     }
 
-
     block_t *block = payload_to_header(bp);
     size_t size = get_size(block);
 
@@ -296,7 +290,7 @@ void free(void *bp)
     write_footer(block, size, old_prev_alloc, false);
 
     block_t *coalesce_ptr = coalesce(block);
-    insert_free_block(free_list, coalesce_ptr);
+    insert_free_block(mega_list, coalesce_ptr);
 }
 
 /*
@@ -410,7 +404,7 @@ static block_t *extend_heap(size_t size)
     // Only remove the block if it's found in the freelist
     if (!old_prev_alloc)
     {
-        remove_free_block(free_list, coalesce_ptr);
+        remove_free_block(mega_list, coalesce_ptr);
     }
 
     return coalesce_ptr;
@@ -432,20 +426,20 @@ static block_t *coalesce(block_t *block)
     // Edge cases? Consider at the ends
     bool prev_is_allocated = get_prev_alloc(block);
     bool next_is_allocated = get_alloc(next_block);
-    if (block == next_block) {
+    if (block == next_block)
+    {
         dbg_printf("Coalesce at right edge of heap. %p\n", block);
         next_is_allocated = true;
     }
 
-
     if (!prev_is_allocated)
     {
-        if (block == find_prev(block)) {
-        dbg_printf("Coalesce at left edge of heap. %p\n", block);
-        prev_is_allocated = true;
+        if (block == find_prev(block))
+        {
+            dbg_printf("Coalesce at left edge of heap. %p\n", block);
+            prev_is_allocated = true;
         }
     }
-    
 
     if (prev_is_allocated && next_is_allocated)
     {
@@ -472,7 +466,7 @@ static block_t *coalesce(block_t *block)
         write_footer(block, new_size, old_prev_alloc, false);
 
         // Splice out the next block from free_list
-        remove_free_block(free_list, next_block);
+        remove_free_block(mega_list, next_block);
 
         write_prev_alloc_of_next_block(block, false); // Not necessary?
         return block;
@@ -492,7 +486,7 @@ static block_t *coalesce(block_t *block)
         write_footer(prev_block, new_size, old_prev_alloc, false);
 
         // Update free_list
-        remove_free_block(free_list, prev_block);
+        remove_free_block(mega_list, prev_block);
 
         write_prev_alloc_of_next_block(prev_block, false);
         return prev_block;
@@ -512,8 +506,8 @@ static block_t *coalesce(block_t *block)
         write_footer(prev_block, new_size, old_prev_alloc, false);
 
         // List Manipulation
-        remove_free_block(free_list, next_block);
-        remove_free_block(free_list, prev_block);
+        remove_free_block(mega_list, next_block);
+        remove_free_block(mega_list, prev_block);
 
         write_prev_alloc_of_next_block(prev_block, false);
         return prev_block;
@@ -536,23 +530,22 @@ static void place(block_t *block, size_t asize)
 
         // Allocation, remove the free block
         bool old_prev_alloc = get_prev_alloc(block);
-        remove_free_block(free_list, block);
+        remove_free_block(mega_list, block);
         write_header(block, asize, old_prev_alloc, true);
         // write_footer(block, asize, old_prev_alloc, true);
 
-        
         // Construct and insert the leftover free block
         block_next = find_next(block);
         write_header(block_next, csize - asize, true, false);
         write_footer(block_next, csize - asize, true, false);
 
-        insert_free_block(free_list, block_next);
+        insert_free_block(mega_list, block_next);
     }
 
     else
     {
         // No splitting required. Therefore remove from free list
-        remove_free_block(free_list, block);
+        remove_free_block(mega_list, block);
 
         // Allocation
         bool old_prev_alloc = get_prev_alloc(block);
@@ -564,13 +557,15 @@ static void place(block_t *block, size_t asize)
 
 /*
  * <what does find_fit do?>
- * Finds a free block that can fit asize
+ * Finds a free block that can fit asize.
  * 
  * Currently, Next-Fit implementation
  */
 static block_t *find_fit(size_t asize)
 {
-    block_t *block = *free_list;
+    // First look in the bin it'd fit into normally. Then keep moving up a class and searching for a block.
+
+    block_t *block = *mega_list;
 
     while (block != NULL)
     {
@@ -591,7 +586,7 @@ static block_t *find_fit(size_t asize)
 bool mm_checkheap(int line)
 {
     // Make sure it is doubly linked.
-    block_t *current = *free_list;
+    block_t *current = *mega_list;
     while (current != NULL)
     {
         if (current->next && current != current->next->prev)
@@ -604,7 +599,7 @@ bool mm_checkheap(int line)
     }
 
     // Make sure all blocks in the freelist are actually free
-    current = *free_list;
+    current = *mega_list;
     while (current != NULL)
     {
         if (get_alloc(current))
@@ -617,13 +612,13 @@ bool mm_checkheap(int line)
     }
 
     // All free blocks? No mark system
-    int num_free_blocks_in_list = 0; 
-    current = *free_list;
-    while (current != NULL) {
-        current = current -> next;
+    int num_free_blocks_in_list = 0;
+    current = *mega_list;
+    while (current != NULL)
+    {
+        current = current->next;
         num_free_blocks_in_list++;
     }
-    
 
     // Iterate through heap implicitly
     int num_free_blocks_in_heap = 0;
@@ -650,7 +645,8 @@ bool mm_checkheap(int line)
     // Check if prev_alloc is maintained
     for (block = heap_start; get_size(find_next(block)) > 0; block = find_next(block))
     {
-        if (get_alloc(block) != get_prev_alloc(find_next(block))) {
+        if (get_alloc(block) != get_prev_alloc(find_next(block)))
+        {
             printf("Prev-Alloc bit mismatch.\n");
             print_heap();
             return false;
@@ -660,13 +656,15 @@ bool mm_checkheap(int line)
     // Check if a free block's header == footer
     for (block = heap_start; get_size(block) > 0; block = find_next(block))
     {
-        if (!get_alloc(block)) {
+        if (!get_alloc(block))
+        {
             // Only for free blocks
-            word_t header = block -> header;
+            word_t header = block->header;
             word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
             word_t footer = *footerp;
 
-            if (header != footer) {
+            if (header != footer)
+            {
                 printf("Footer and Header of free block don't match.\n");
                 print_heap();
                 return false;
@@ -768,7 +766,6 @@ static void write_footer(block_t *block, size_t size, bool prev_alloc, bool allo
     *footerp = pack(size, prev_alloc, alloc);
 }
 
-
 /*
  * find_next: returns the next consecutive block on the heap by adding the
  *            size of the block.
@@ -827,7 +824,7 @@ static void print_block(block_t *block)
     if (!get_alloc(block))
     {
         printf("[Addr: %p, Size: %lu, PrevAlloc: %u, Alloc: %u| next: %p, prev: %p]\n",
-               block, get_size(block), get_prev_alloc(block),get_alloc(block), block->next, block->prev);
+               block, get_size(block), get_prev_alloc(block), get_alloc(block), block->next, block->prev);
     }
     else
     {
@@ -847,8 +844,9 @@ static void print_heap()
 static void print_free_list()
 {
     printf("FREELIST DUMP vvv\n");
-    block_t *current = *free_list;
-    while (current != NULL){
+    block_t *current = *mega_list;
+    while (current != NULL)
+    {
         print_block(current);
         current = current->next;
     }
@@ -905,7 +903,7 @@ static void remove_free_block(block_t **list, block_t *block)
 // Returns the prev_alloc bit of a block
 static bool get_prev_alloc(block_t *block)
 {
-    return (bool) !!(block->header & prev_alloc_mask);
+    return (bool)!!(block->header & prev_alloc_mask);
 }
 
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc)
@@ -915,43 +913,62 @@ static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc)
     next_block->header = new_header;
 }
 
-static void write_prev_alloc(block_t* block, bool prev_alloc)
+static void write_prev_alloc(block_t *block, bool prev_alloc)
 {
     block->header = get_size(block) | (prev_alloc << 1) | get_alloc(block);
 }
 
 /* Segregated List Helper Functions ---------- */
-static bool is_small(block_t *block)
+static bool is_small(size_t size)
 {
-    return get_size(block) <= MAX_SMALL_BIN_SIZE;
+    return size <= MAX_SMALL_BIN_SIZE;
 }
 
-static bool is_large(block_t *block)
+static bool is_large(size_t size)
 {
-    return !is_small(block) && get_size(block) <= MAX_LARGE_BIN_SIZE;
+    return !is_small(size) && size <= MAX_LARGE_BIN_SIZE;
 }
 
-static int small_idx(block_t *block)
+static size_t small_idx(size_t size)
 {
-    size_t size = get_size(block);
     return (size - MIN_SMALL_BIN_SIZE) / dsize;
 }
 
-static int large_idx(block_t *block)
+static size_t large_idx(size_t size)
 {
-    size_t size = get_size(block);
     return (size - MIN_SMALL_BIN_SIZE) / LARGE_BIN_RANGE;
 }
 
-// void small_bin_insert(block_t *block)
-// {
-//     int small_list_idx = small_idx(block);
-//     bins->small_bins[small_list_idx];
-    
-// }
+static void small_bin_insert(block_t *block)
+{
+    size_t size = get_size(block);
+    int small_list_idx = small_idx(size);
+    block_t **list_head = &bins->small_bins[small_list_idx];
+    insert_free_block(list_head, block);
+}
 
-// void large_bin_insert(block_t *block)
-// {
+static void large_bin_insert(block_t *block)
+{
+    size_t size = get_size(block);
+    size_t large_list_idx = large_idx(size);
+    block_t **list_head = &bins->large_bins[large_list_idx];
+    insert_free_block(list_head, block);
+}
 
-// }
-
+// Inserts into a block into some seg list
+static void insert(block_t **list, block_t *block)
+{
+    size_t size = get_size(block);
+    if (is_small(size))
+    {
+        small_bin_insert(block);
+    }
+    else if (is_large(size))
+    {
+        large_bin_insert(block);
+    }
+    else
+    {
+        insert_free_block(mega_list, block);
+    }
+}
