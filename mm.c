@@ -213,7 +213,7 @@ bool mm_init(void)
     write_footer(first_ever_block, get_size(first_ever_block), true, false);
 
     insert_block(first_ever_block);
-    
+
     return true;
 }
 
@@ -561,10 +561,12 @@ static block_t *find_fit(size_t asize)
 {
     // First look in the bin it'd fit into normally. Then keep moving up a class and searching for a block.
     block_t **list = NULL;
+    bool in_small_bin = false;
     if (is_small(asize))
     {
         size_t idx = small_idx(asize);
         list = &bins->small_bins[idx];
+        in_small_bin = true;
     }
     else if (is_large(asize))
     {
@@ -581,15 +583,31 @@ static block_t *find_fit(size_t asize)
     block_t **end = ((bins->small_bins) + NUM_SMALL_BINS + NUM_LARGE_BINS);
     while (current_list != end)
     {
-        // Traverse this list
-        block_t *block = *current_list;
-        while (block != NULL)
+        // Traverse this list. If it's a small bin we don't need to traverse, just check 1 block.
+        if (in_small_bin)
         {
-            if (!(get_alloc(block)) && (asize <= get_size(block)))
+            // If we're in the last small_list, switch to traversal mode.
+            if (current_list == (bins->large_bins - 1)){
+                in_small_bin = false;
+            }
+
+            block_t *block = *current_list;
+            if (block != NULL && !(get_alloc(block)) && (asize <= get_size(block)))
             {
                 return block;
             }
-            block = block->next;
+        }
+        else
+        {
+            block_t *block = *current_list;
+            while (block != NULL)
+            {
+                if (!(get_alloc(block)) && (asize <= get_size(block)))
+                {
+                    return block;
+                }
+                block = block->next;
+            }
         }
 
         current_list++; // Move to the next list
