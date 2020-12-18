@@ -101,10 +101,10 @@ struct block
 };
 
 // Non-circular Doubly Linked List, LIFO
-// typedef struct FreeList
-// {
-//     block_t *root;
-// } FreeList;
+typedef struct FreeList
+{
+    block_t *root;
+} FreeList;
 
 
 // Segregated Lists, our global list will be the MEGA_BLOCK holder
@@ -119,7 +119,7 @@ typedef struct Bins
 /* Global variables */
 /* Pointer to first block */
 static block_t *heap_start = NULL;  // Start of heap
-static block_t *free_list = NULL; // Doubly Linked List of all free_blocks
+static block_t **free_list = NULL; // Doubly Linked List of all free_blocks
 static Bins *bins = NULL;    // Pointers to segregated lists
 
 
@@ -160,8 +160,8 @@ static bool get_prev_alloc(block_t *block);
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc);
 static void write_prev_alloc(block_t* block, bool prev_alloc);
 
-static void insert_free_block(block_t *block);
-static void remove_free_block(block_t *block);
+static void insert_free_block(block_t **list, block_t *block);
+static void remove_free_block(block_t **list, block_t *block);
 
 static bool is_small(block_t *block);
 static bool is_large(block_t *block);
@@ -193,6 +193,8 @@ bool mm_init(void)
     {
         bins -> large_bins[i] = NULL;
     }
+
+    free_list = (block_t **) mem_sbrk(dsize);
     
 
     // Create the initial empty heap
@@ -213,10 +215,11 @@ bool mm_init(void)
     write_header(first_ever_block, get_size(first_ever_block), true, false);
     write_footer(first_ever_block, get_size(first_ever_block), true, false);
 
-    insert_free_block(first_ever_block);
+    insert_free_block(free_list, first_ever_block);
 
-    if (free_list == NULL)
+    if (*free_list == NULL)
     {
+        printf("L\n");
         return false;
     }
     return true;
@@ -262,7 +265,7 @@ void *malloc(size_t size)
         {
             return bp;
         }
-        insert_free_block(block);
+        insert_free_block(free_list, block);
     }
 
     place(block, asize);
@@ -293,7 +296,7 @@ void free(void *bp)
     write_footer(block, size, old_prev_alloc, false);
 
     block_t *coalesce_ptr = coalesce(block);
-    insert_free_block(coalesce_ptr);
+    insert_free_block(free_list, coalesce_ptr);
 }
 
 /*
@@ -407,7 +410,7 @@ static block_t *extend_heap(size_t size)
     // Only remove the block if it's found in the freelist
     if (!old_prev_alloc)
     {
-        remove_free_block(coalesce_ptr);
+        remove_free_block(free_list, coalesce_ptr);
     }
 
     return coalesce_ptr;
@@ -469,7 +472,7 @@ static block_t *coalesce(block_t *block)
         write_footer(block, new_size, old_prev_alloc, false);
 
         // Splice out the next block from free_list
-        remove_free_block(next_block);
+        remove_free_block(free_list, next_block);
 
         write_prev_alloc_of_next_block(block, false); // Not necessary?
         return block;
@@ -489,7 +492,7 @@ static block_t *coalesce(block_t *block)
         write_footer(prev_block, new_size, old_prev_alloc, false);
 
         // Update free_list
-        remove_free_block(prev_block);
+        remove_free_block(free_list, prev_block);
 
         write_prev_alloc_of_next_block(prev_block, false);
         return prev_block;
@@ -509,8 +512,8 @@ static block_t *coalesce(block_t *block)
         write_footer(prev_block, new_size, old_prev_alloc, false);
 
         // List Manipulation
-        remove_free_block(next_block);
-        remove_free_block(prev_block);
+        remove_free_block(free_list, next_block);
+        remove_free_block(free_list, prev_block);
 
         write_prev_alloc_of_next_block(prev_block, false);
         return prev_block;
@@ -533,7 +536,7 @@ static void place(block_t *block, size_t asize)
 
         // Allocation, remove the free block
         bool old_prev_alloc = get_prev_alloc(block);
-        remove_free_block(block);
+        remove_free_block(free_list, block);
         write_header(block, asize, old_prev_alloc, true);
         // write_footer(block, asize, old_prev_alloc, true);
 
@@ -543,13 +546,13 @@ static void place(block_t *block, size_t asize)
         write_header(block_next, csize - asize, true, false);
         write_footer(block_next, csize - asize, true, false);
 
-        insert_free_block(block_next);
+        insert_free_block(free_list, block_next);
     }
 
     else
     {
         // No splitting required. Therefore remove from free list
-        remove_free_block(block);
+        remove_free_block(free_list, block);
 
         // Allocation
         bool old_prev_alloc = get_prev_alloc(block);
@@ -567,7 +570,7 @@ static void place(block_t *block, size_t asize)
  */
 static block_t *find_fit(size_t asize)
 {
-    block_t *block = free_list;
+    block_t *block = *free_list;
 
     while (block != NULL)
     {
@@ -588,7 +591,7 @@ static block_t *find_fit(size_t asize)
 bool mm_checkheap(int line)
 {
     // Make sure it is doubly linked.
-    block_t *current = free_list;
+    block_t *current = *free_list;
     while (current != NULL)
     {
         if (current->next && current != current->next->prev)
@@ -601,7 +604,7 @@ bool mm_checkheap(int line)
     }
 
     // Make sure all blocks in the freelist are actually free
-    current = free_list;
+    current = *free_list;
     while (current != NULL)
     {
         if (get_alloc(current))
@@ -615,7 +618,7 @@ bool mm_checkheap(int line)
 
     // All free blocks? No mark system
     int num_free_blocks_in_list = 0; 
-    current = free_list;
+    current = *free_list;
     while (current != NULL) {
         current = current -> next;
         num_free_blocks_in_list++;
@@ -844,46 +847,46 @@ static void print_heap()
 static void print_free_list()
 {
     printf("FREELIST DUMP vvv\n");
-    block_t *current = free_list;
+    block_t *current = *free_list;
     while (current != NULL){
         print_block(current);
         current = current->next;
     }
 }
 
-static void insert_free_block(block_t *block)
+static void insert_free_block(block_t **list, block_t *block)
 {
-    if (free_list == NULL)
+    if (*list == NULL)
     {
         block->next = NULL;
         block->prev = NULL;
-        free_list = block;
+        *list = block;
         return;
     }
 
     // Non-circular doubly linked insertion
-    block->next = free_list;
+    block->next = *list;
     block->prev = NULL;
-    free_list->prev = block;
+    (*list)->prev = block;
 
     // The inserted block is now the root
-    free_list = block;
+    *list = block;
 }
 
 // Removes a specified free block from freelist
-static void remove_free_block(block_t *block)
+static void remove_free_block(block_t **list, block_t *block)
 {
     // If only a single node, remove it.
-    if (free_list == block && free_list->prev == free_list && free_list->next == free_list)
+    if (*list == block && (*list)->prev == (*list) && (*list)->next == *list)
     {
-        free_list = NULL;
+        *list = NULL;
         return;
     }
 
     // If we are removing the root, change the root.
-    if (free_list == block)
+    if (*list == block)
     {
-        free_list = free_list->next;
+        *list = (*list)->next;
     }
 
     block_t *splice_block_next = block->next;
