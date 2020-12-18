@@ -4,6 +4,12 @@
         "*.tcc": "c",
         "list": "c",
         "cstdio": "c",
-        "functional": "c"
+        "functional": "c",
+        "deque": "c",
+        "string": "c",
+        "unordered_map": "c",
+        "vector": "c",
+        "ostream": "c",
+        "hashtable": "c"
     }
 }
