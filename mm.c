@@ -73,6 +73,14 @@ static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
+#define NUM_SMALL_BINS 256
+#define NUM_LARGE_BINS 256
+#define LARGE_BIN_RANGE 64  // The range a large bin covers
+static size_t MIN_SMALL_BIN_SIZE; 
+static size_t MAX_SMALL_BIN_SIZE;
+static size_t MIN_LARGE_BIN_SIZE;
+static size_t MAX_LARGE_BIN_SIZE;
+
 typedef struct block block_t;
 struct block
 {
@@ -98,58 +106,23 @@ typedef struct FreeList
     block_t *root;
 } FreeList;
 
+
+// Segregated Lists, our global list will be the MEGA_BLOCK holder
+typedef struct Bins
+{
+    block_t *small_bins[NUM_SMALL_BINS];
+    block_t *large_bins[NUM_LARGE_BINS];
+} Bins;
+
+
+
 /* Global variables */
 /* Pointer to first block */
 static block_t *heap_start = NULL;  // Start of heap
 static FreeList free_list = {NULL}; // Doubly Linked List of all free_blocks
+static Bins *bins = NULL;    // Pointers to segregated lists
 
-static void insert_free_block(block_t *block)
-{
-    if (free_list.root == NULL)
-    {
-        block->next = NULL;
-        block->prev = NULL;
-        free_list.root = block;
-        return;
-    }
 
-    // Non-circular doubly linked insertion
-    block->next = free_list.root;
-    block->prev = NULL;
-    free_list.root->prev = block;
-
-    // The inserted block is now the root
-    free_list.root = block;
-}
-
-// Removes a specified free block from freelist
-static void remove_free_block(block_t *block)
-{
-    // If only a single node, remove it.
-    if (free_list.root == block && free_list.root->prev == free_list.root && free_list.root->next == free_list.root)
-    {
-        free_list.root = NULL;
-        return;
-    }
-
-    // If we are removing the root, change the root.
-    if (free_list.root == block)
-    {
-        free_list.root = free_list.root->next;
-    }
-
-    block_t *splice_block_next = block->next;
-    block_t *splice_block_prev = block->prev;
-
-    if (splice_block_prev != NULL)
-    {
-        splice_block_prev->next = splice_block_next;
-    }
-    if (splice_block_next != NULL)
-    {
-        splice_block_next->prev = splice_block_prev;
-    }
-}
 
 bool mm_checkheap(int lineno);
 
@@ -187,11 +160,38 @@ static bool get_prev_alloc(block_t *block);
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc);
 static void write_prev_alloc(block_t* block, bool prev_alloc);
 
+static void insert_free_block(block_t *block);
+static void remove_free_block(block_t *block);
+
+static bool is_small(block_t *block);
+static bool is_large(block_t *block);
+static int small_idx(block_t *block);
+static int large_idx(block_t *block);
+
 /*
  * <what does mm_init do?>
  */
 bool mm_init(void)
 {
+    // Initialize Static Global Variables.
+    MIN_SMALL_BIN_SIZE = min_block_size; 
+    MAX_SMALL_BIN_SIZE = MIN_SMALL_BIN_SIZE + (NUM_SMALL_BINS - 1) * dsize;
+    MIN_LARGE_BIN_SIZE = MAX_SMALL_BIN_SIZE + dsize;
+    MAX_LARGE_BIN_SIZE = MIN_LARGE_BIN_SIZE + (NUM_LARGE_BINS - 1) * LARGE_BIN_RANGE;
+
+    // Allocate and zero initialize bins
+    bins = (Bins *) mem_sbrk(sizeof(Bins));
+    size_t i;
+    for (i = 0; i < NUM_SMALL_BINS; i++)
+    {
+        bins -> small_bins[i] = NULL;
+    }
+    for (i = 0; i < NUM_LARGE_BINS; i++)
+    {
+        bins -> large_bins[i] = NULL;
+    }
+    
+
     // Create the initial empty heap
     word_t *start = (word_t *)(mem_sbrk(2 * wsize));
 
@@ -848,6 +848,54 @@ static void print_free_list()
     }
 }
 
+static void insert_free_block(block_t *block)
+{
+    if (free_list.root == NULL)
+    {
+        block->next = NULL;
+        block->prev = NULL;
+        free_list.root = block;
+        return;
+    }
+
+    // Non-circular doubly linked insertion
+    block->next = free_list.root;
+    block->prev = NULL;
+    free_list.root->prev = block;
+
+    // The inserted block is now the root
+    free_list.root = block;
+}
+
+// Removes a specified free block from freelist
+static void remove_free_block(block_t *block)
+{
+    // If only a single node, remove it.
+    if (free_list.root == block && free_list.root->prev == free_list.root && free_list.root->next == free_list.root)
+    {
+        free_list.root = NULL;
+        return;
+    }
+
+    // If we are removing the root, change the root.
+    if (free_list.root == block)
+    {
+        free_list.root = free_list.root->next;
+    }
+
+    block_t *splice_block_next = block->next;
+    block_t *splice_block_prev = block->prev;
+
+    if (splice_block_prev != NULL)
+    {
+        splice_block_prev->next = splice_block_next;
+    }
+    if (splice_block_next != NULL)
+    {
+        splice_block_next->prev = splice_block_prev;
+    }
+}
+
 // Returns the prev_alloc bit of a block
 static bool get_prev_alloc(block_t *block)
 {
@@ -864,4 +912,27 @@ static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc)
 static void write_prev_alloc(block_t* block, bool prev_alloc)
 {
     block->header = get_size(block) | (prev_alloc << 1) | get_alloc(block);
+}
+
+/* Segregated List Helper Functions ---------- */
+static bool is_small(block_t *block)
+{
+    return get_size(block) <= MAX_SMALL_BIN_SIZE;
+}
+
+static bool is_large(block_t *block)
+{
+    return !is_small(block) && get_size(block) <= MAX_LARGE_BIN_SIZE;
+}
+
+static int small_idx(block_t *block)
+{
+    size_t size = get_size(block);
+    return (size - MIN_SMALL_BIN_SIZE) / dsize;
+}
+
+static int large_idx(block_t *block)
+{
+    size_t size = get_size(block);
+    return (size - MIN_SMALL_BIN_SIZE) / LARGE_BIN_RANGE;
 }
