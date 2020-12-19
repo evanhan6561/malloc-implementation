@@ -62,6 +62,9 @@
 #define dbg_ensures(...)
 #endif
 
+#include <math.h>
+
+
 /* Basic constants */
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);              // word and header size (bytes)
@@ -74,8 +77,7 @@ static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
 #define NUM_SMALL_BINS 256
-#define NUM_LARGE_BINS 256
-#define LARGE_BIN_RANGE 64 // The range a large bin covers. The last large_bin contains mega blocks.
+#define NUM_LARGE_BINS 16
 static size_t MIN_SMALL_BIN_SIZE;
 static size_t MAX_SMALL_BIN_SIZE;
 static size_t MIN_LARGE_BIN_SIZE;
@@ -1005,7 +1007,8 @@ static size_t small_idx(size_t size)
 
 static size_t large_idx(size_t size)
 {
-    size_t idx = (size - MIN_SMALL_BIN_SIZE) / LARGE_BIN_RANGE;
+    // size_t idx = (size - MIN_SMALL_BIN_SIZE) / LARGE_BIN_RANGE;
+    size_t idx = log2l(size - MAX_SMALL_BIN_SIZE - dsize) - 4;
     if (idx >= NUM_LARGE_BINS)
     {
         return NUM_LARGE_BINS - 1;
