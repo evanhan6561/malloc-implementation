@@ -62,8 +62,6 @@
 #define dbg_ensures(...)
 #endif
 
-#include "stree.h"
-
 /* Basic constants */
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);              // word and header size (bytes)
@@ -73,20 +71,14 @@ static const size_t chunksize = (1 << 12);               // requires (chunksize 
 
 static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
-static const word_t grouped_mask = 0x4;
 static const word_t size_mask = ~(word_t)0xF;
 
-// Segregated List Constants
 #define NUM_SMALL_BINS 256
 #define NUM_LARGE_BINS 256
 #define LARGE_BIN_RANGE 64 // The range a large bin covers. The last large_bin contains mega blocks.
 static size_t MIN_SMALL_BIN_SIZE;
 static size_t MAX_SMALL_BIN_SIZE;
 static size_t MIN_LARGE_BIN_SIZE;
-
-// Grouped Block Constants
-static const size_t NUM_BLOCKS_IN_GROUP = 64;
-static const size_t MAX_GROUPED_SIZE = 128;
 
 typedef struct block block_t;
 struct block
@@ -105,14 +97,15 @@ struct block
      */
     block_t *next;
     block_t *prev;
-
-    /* Megablock Data */
-    word_t alloc_vector; // bit vector to track 64 fixed-size blocks
-    word_t accepted_size;
-    char fixed_payload[0];
 };
 
-// Segregated Lists
+// Non-circular Doubly Linked List, LIFO
+typedef struct FreeList
+{
+    block_t *root;
+} FreeList;
+
+// Segregated Lists, our global list will be the MEGA_BLOCK holder
 typedef struct Bins
 {
     block_t *small_bins[NUM_SMALL_BINS];
@@ -120,9 +113,9 @@ typedef struct Bins
 } Bins;
 
 /* Global variables */
+/* Pointer to first block */
 static block_t *heap_start = NULL; // Start of heap
 static Bins *bins = NULL;          // Pointers to segregated lists
-static tree_t *tree = NULL;        // Tree to hold free/partially filled grouped_blocks
 
 bool mm_checkheap(int lineno);
 
@@ -174,13 +167,6 @@ static void small_bin_remove(block_t *block);
 static void large_bin_remove(block_t *block);
 static void remove_block(block_t *block);
 
-static void write_grouped(block_t *block, bool grouped);
-static bool is_grouped(block_t *block);
-static bool is_grouped_size(size_t size);
-static bool is_grouped_ptr(void *bp);
-static size_t get_group_idx(void *bp);
-static void set_alloc_vector_bit(block_t *grouped_block, size_t idx, bool bit);
-
 /*
  * <what does mm_init do?>
  */
@@ -202,11 +188,6 @@ bool mm_init(void)
     {
         bins->large_bins[i] = NULL;
     }
-
-    // Allocate and initialize tree to hold grouped blocks
-    tree = tree_new();
-    tree_insert(tree, (long)bins, (void *)bins);
-    // printf("No cast: %p, Casted: %lx, Tree Return: %p\n", bins, (long)bins, (Bins *) tree_find(tree, (long)bins));
 
     // Create the initial empty heap
     word_t *start = (word_t *)(mem_sbrk(2 * wsize));
@@ -296,7 +277,6 @@ void free(void *bp)
     {
         return;
     }
-    // Todo: Check if bp is contained in a grouped block
 
     block_t *block = payload_to_header(bp);
     size_t size = get_size(block);
@@ -607,8 +587,7 @@ static block_t *find_fit(size_t asize)
         if (in_small_bin)
         {
             // If we're in the last small_list, switch to traversal mode.
-            if (current_list == (bins->large_bins - 1))
-            {
+            if (current_list == (bins->large_bins - 1)){
                 in_small_bin = false;
             }
 
@@ -1097,72 +1076,4 @@ static void remove_block(block_t *block)
     {
         printf("Critical Error! Block is not small or large");
     }
-}
-
-static void write_grouped(block_t *block, bool grouped)
-{
-    block->header = get_size(block) | grouped << 2 | get_prev_alloc(block) << 1 | get_alloc(block);
-}
-
-static bool is_grouped(block_t *block)
-{
-    return (bool)!!(block->header & grouped_mask);
-}
-
-static bool is_grouped_size(size_t size)
-{
-    return size <= MAX_GROUPED_SIZE;
-}
-
-// When freeing, check if a pointer is found in a grouped block
-static bool is_grouped_ptr(void *bp)
-{
-    block_t **closest_group = (block_t **)tree_find_nearest(tree, (tkey_t)bp);
-    word_t ptr = (word_t)bp;
-    word_t min_value = (word_t)(*closest_group)->fixed_payload;
-    word_t offset = (*closest_group)->accepted_size * (NUM_BLOCKS_IN_GROUP - 1);
-    word_t max_value = min_value + offset;
-
-    return min_value <= ptr && ptr <= max_value;
-}
-
-// 
-static size_t get_group_idx(void *bp)
-{
-    block_t **closest_group = (block_t **)tree_find_nearest(tree, (tkey_t)bp);
-    size_t ptr = (size_t)bp;
-    size_t min_value = (size_t)(*closest_group)->fixed_payload;
-    size_t group_idx = (ptr - min_value) / (*closest_group)->accepted_size;
-    return group_idx;
-}
-
-static void set_alloc_vector_bit(block_t *grouped_block, size_t idx, bool bit)
-{
-    grouped_block->alloc_vector |= (bit << idx);
-}
-
-// find_fit is going to traverse the tree and find a grouped block
-static void allocate_grouped_block_member(block_t *grouped_block)
-{
-    // Find the first free bit in grouped_block and then set that to 1.
-    word_t inverted_alloc_vector = ~(grouped_block->alloc_vector);
-    int idx = __builtin_ffsl(inverted_alloc_vector) - 1;
-    set_alloc_vector_bit(grouped_block, idx, true);
-
-    // Remove a grouped block from the free tree if it's full
-    if (grouped_block->alloc_vector == (word_t)~0)
-    {
-        tree_remove(tree, (tkey_t)grouped_block->fixed_payload);
-    }
-}
-
-// Assuming bp is in a group, it will free something
-static void free_grouped_block_member(void *bp)
-{
-    // Find out which grouped block bp belongs to
-    block_t *closest_grouped_block = (block_t *)tree_find_nearest(tree, (tkey_t)bp);
-
-    // Mark the member as free in our bit vector
-    size_t idx = get_group_idx(bp);
-    set_alloc_vector_bit(closest_grouped_block, idx, false);
 }
