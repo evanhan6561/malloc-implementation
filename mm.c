@@ -180,9 +180,6 @@ static bool is_grouped_size(size_t size);
 static bool is_grouped_ptr(void *bp);
 static size_t get_group_idx(void *bp);
 static void set_alloc_vector_bit(block_t *grouped_block, size_t idx, bool bit);
-static void *allocate_grouped_block_member(block_t *grouped_block);
-static void free_grouped_block_member(void *bp);
-static block_t *pre_order_search(node_t *root, size_t asize);
 
 /*
  * <what does mm_init do?>
@@ -208,6 +205,8 @@ bool mm_init(void)
 
     // Allocate and initialize tree to hold grouped blocks
     tree = tree_new();
+    tree_insert(tree, (long)bins, (void *)bins);
+    // printf("No cast: %p, Casted: %lx, Tree Return: %p\n", bins, (long)bins, (Bins *) tree_find(tree, (long)bins));
 
     // Create the initial empty heap
     word_t *start = (word_t *)(mem_sbrk(2 * wsize));
@@ -260,41 +259,12 @@ void *malloc(size_t size)
         return bp;
     }
 
-    if (size <= MAX_GROUPED_SIZE)
-    {
-        // Allocate an existing group member if possible. Else allocate a new grouped block and insert.
-        // Traverse the tree to find a grouped block with matching size
-        size_t rounded_size = round_up(size, dsize);
-        block_t *block = pre_order_search(tree->root, rounded_size);
-        
-        // Insert a new grouped block of the size if no matches are found
-        if (block == NULL)
-        {
-            size_t needed_amt = rounded_size * NUM_BLOCKS_IN_GROUP + dsize + dsize + wsize; // dsize for alloc_vec and accepted_size
-            block_t *grouped_block = malloc(needed_amt);
-            write_prev_alloc(grouped_block, true);
-            write_prev_alloc_of_next_block(grouped_block, true);
-            write_grouped(grouped_block, true);
-            grouped_block->next = NULL;
-            grouped_block->prev = NULL;
-            grouped_block->accepted_size = rounded_size;
-            grouped_block->alloc_vector = 0;
-
-
-            tree_insert(tree, (tkey_t) grouped_block->fixed_payload, grouped_block);
-            return allocate_grouped_block_member(grouped_block);
-        }
-
-        return allocate_grouped_block_member(block);
-    }
-
     // Adjust block size to include overhead and to meet alignment requirements
     asize = round_up(size + wsize, dsize); // If we remove footer, +wsize instead of +dsize
     if (asize < min_block_size)
     {
         asize = min_block_size;
     }
-
     // Search the free list for a fit
     block = find_fit(asize);
 
@@ -327,11 +297,6 @@ void free(void *bp)
         return;
     }
     // Todo: Check if bp is contained in a grouped block
-    if (is_grouped_ptr(bp))
-    {
-        free_grouped_block_member(bp);
-        return;
-    }
 
     block_t *block = payload_to_header(bp);
     size_t size = get_size(block);
@@ -1161,12 +1126,13 @@ static bool is_grouped_ptr(void *bp)
     return min_value <= ptr && ptr <= max_value;
 }
 
+// 
 static size_t get_group_idx(void *bp)
 {
-    block_t *closest_group = (block_t *)tree_find_nearest(tree, (tkey_t)bp);
+    block_t **closest_group = (block_t **)tree_find_nearest(tree, (tkey_t)bp);
     size_t ptr = (size_t)bp;
-    size_t min_value = (size_t)closest_group->fixed_payload;
-    size_t group_idx = (ptr - min_value) / closest_group->accepted_size;
+    size_t min_value = (size_t)(*closest_group)->fixed_payload;
+    size_t group_idx = (ptr - min_value) / (*closest_group)->accepted_size;
     return group_idx;
 }
 
@@ -1176,14 +1142,18 @@ static void set_alloc_vector_bit(block_t *grouped_block, size_t idx, bool bit)
 }
 
 // find_fit is going to traverse the tree and find a grouped block
-static void *allocate_grouped_block_member(block_t *grouped_block)
+static void allocate_grouped_block_member(block_t *grouped_block)
 {
     // Find the first free bit in grouped_block and then set that to 1.
     word_t inverted_alloc_vector = ~(grouped_block->alloc_vector);
     int idx = __builtin_ffsl(inverted_alloc_vector) - 1;
     set_alloc_vector_bit(grouped_block, idx, true);
-    char *location = (char*)(grouped_block->fixed_payload) + (grouped_block->accepted_size) * idx;
-    return (void *)location;
+
+    // Remove a grouped block from the free tree if it's full
+    if (grouped_block->alloc_vector == (word_t)~0)
+    {
+        tree_remove(tree, (tkey_t)grouped_block->fixed_payload);
+    }
 }
 
 // Assuming bp is in a group, it will free something
@@ -1195,29 +1165,4 @@ static void free_grouped_block_member(void *bp)
     // Mark the member as free in our bit vector
     size_t idx = get_group_idx(bp);
     set_alloc_vector_bit(closest_grouped_block, idx, false);
-}
-
-// Adapted from: https://www.geeksforgeeks.org/search-a-node-in-binary-tree/
-// Traverse the tree to find a fitting block
-static block_t *pre_order_search(node_t *root, size_t asize)
-{
-    if (root == NULL)
-    {
-        return NULL;
-    }
-
-    // If we find a non-full grouped block of matching size, we got it
-    if (((block_t *)root->record)->accepted_size == asize && ((block_t *)root->record)->alloc_vector != (word_t)~0UL)
-    {
-        return (block_t *)root->record;
-    }
-
-    block_t *left_result = pre_order_search(root->left, asize);
-    if (left_result)
-    {
-        return left_result;
-    }
-
-    block_t *right_result = pre_order_search(root->right, asize);
-    return right_result;
 }
