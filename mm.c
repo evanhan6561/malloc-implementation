@@ -47,7 +47,7 @@
  * You may not define any other macros having arguments.
  */
 // #define DEBUG // uncomment this line to enable debugging
-//
+
 #ifdef DEBUG
 /* When debugging is enabled, these form aliases to useful functions */
 #define dbg_printf(...) printf(__VA_ARGS__)
@@ -63,6 +63,7 @@
 #endif
 
 #include <math.h>
+#include <unistd.h>
 
 /* Basic constants */
 typedef uint64_t word_t;
@@ -112,8 +113,9 @@ typedef struct Bins
 
 /* Global variables */
 /* Pointer to first block */
-static block_t *heap_start = NULL;  // Start of heap
-static Bins *bins = NULL;           // Pointers to segregated lists
+static block_t *heap_start = NULL; // Start of heap
+static Bins *bins = NULL;          // Pointers to segregated lists
+static word_t skip_vector = 0;     // Bit vector to optimize find_fit
 
 bool mm_checkheap(int lineno);
 
@@ -168,13 +170,17 @@ static void remove_block(block_t *block);
 
 static bool get_sixteen(block_t *block);
 static bool get_prev_sixteen(block_t *block);
-static void write_sixteen(block_t *block, bool sixteen);
 static void write_prev_sixteen(block_t *block, bool prev_sixteen);
 static void write_prev_sixteen_of_next_block(block_t *block, bool prev_sixteen);
 static block_t *get_sixteen_prev_ptr(block_t *block);
 static block_t *get_sixteen_next_ptr(block_t *block);
 static block_t *get_next_free_block(block_t *block);
 static block_t *get_prev_free_block(block_t *block);
+
+static void set_ith_bit(word_t idx);
+static void clear_ith_bit(word_t idx);
+static word_t get_ith_bit(word_t idx);
+static int next_set_bit(word_t idx);
 
 /*
  * <what does mm_init do?>
@@ -596,60 +602,130 @@ static void place(block_t *block, size_t asize)
 static block_t *find_fit(size_t asize)
 {
     // First look in the bin it'd fit into normally. Then keep moving up a class and searching for a block.
-    block_t **list = NULL;
+    block_t **current_list;
+    size_t idx;
     bool in_small_bin = false;
     if (is_small(asize))
     {
-        size_t idx = small_idx(asize);
-        list = &bins->small_bins[idx];
+        idx = small_idx(asize);
+        current_list = &bins->small_bins[idx];
         in_small_bin = true;
     }
     else if (is_large(asize))
     {
-        size_t idx = large_idx(asize);
-        list = &bins->large_bins[idx];
+        idx = large_idx(asize);
+        current_list = &bins->large_bins[idx];
     }
     else
     {
         printf("Block is not large or small!");
     }
 
-    // We've found a list to start searching in. Search it then keep moving up.
-    block_t **current_list = list;
-    block_t **end = ((bins->small_bins) + NUM_SMALL_BINS + NUM_LARGE_BINS);
-    while (current_list != end)
+    int set_bit_idx = idx;
+    if (!in_small_bin)
     {
-        // Traverse this list. If it's a small bin we don't need to traverse, just check 1 block.
-        if (in_small_bin)
+        set_bit_idx += NUM_SMALL_BINS;
+    }
+    // printf("\n");
+    // printf("Predicted Idx: %d\n", set_bit_idx);
+    while (set_bit_idx != -1)
+    {
+        // printf("set_bit_idx: %d, ", set_bit_idx);
+        // Does the set_bit_idx indicate small or large?
+        if (set_bit_idx < NUM_SMALL_BINS)
         {
-            // If we're in the last small_list, switch to traversal mode.
-            if (current_list == (bins->large_bins - 1))
-            {
-                in_small_bin = false;
-            }
-
             block_t *block = *current_list;
-            if (block != NULL && !(get_alloc(block)) && (asize <= get_size(block)))
+            if (block == NULL)
             {
-                return block;
+                clear_ith_bit(set_bit_idx);
+            }
+            else
+            {
+                if (block != NULL && (asize <= get_size(block)))
+                {
+                    return block;
+                }
             }
         }
         else
         {
             block_t *block = *current_list;
+            if (block == NULL)
+            {
+                clear_ith_bit(set_bit_idx);
+            }
             while (block != NULL)
             {
-                if (!(get_alloc(block)) && (asize <= get_size(block)))
+                if ((asize <= get_size(block)))
                 {
                     return block;
                 }
                 block = get_next_free_block(block);
             }
         }
-
-        current_list++; // Move to the next list
+        set_bit_idx = next_set_bit((word_t)set_bit_idx);
+        current_list = bins->small_bins + set_bit_idx;
+        // printf("set_bit_idx: %d\n", set_bit_idx);
+        // printf("Bit_Vector: %llx\n", (long long unsigned int)skip_vector);
     }
+    // printf("\n");
 
+    // // First look in the bin it'd fit into normally. Then keep moving up a class and searching for a block.
+    // block_t **list = NULL;
+    // bool in_small_bin = false;
+    // if (is_small(asize))
+    // {
+    //     size_t idx = small_idx(asize);
+    //     list = &bins->small_bins[idx];
+    //     in_small_bin = true;
+    // }
+    // else if (is_large(asize))
+    // {
+    //     size_t idx = large_idx(asize);
+    //     list = &bins->large_bins[idx];
+    // }
+    // else
+    // {
+    //     printf("Block is not large or small!");
+    // }
+
+    // // We've found a list to start searching in. Search it then keep moving up.
+    // block_t **current_list = list;
+    // block_t **end = ((bins->small_bins) + NUM_SMALL_BINS + NUM_LARGE_BINS);
+    // while (current_list != end)
+    // {
+    //     // Traverse this list. If it's a small bin we don't need to traverse, just check 1 block.
+    //     if (in_small_bin)
+    //     {
+    //         // If we're in the last small_list, switch to traversal mode.
+    //         if (current_list == (bins->large_bins - 1))
+    //         {
+    //             in_small_bin = false;
+    //         }
+
+    //         block_t *block = *current_list;
+    //         if (block != NULL && !(get_alloc(block)) && (asize <= get_size(block)))
+    //         {
+    //             return block;
+    //         }
+    //     }
+    //     else
+    //     {
+    //         block_t *block = *current_list;
+    //         while (block != NULL)
+    //         {
+    //             if (!(get_alloc(block)) && (asize <= get_size(block)))
+    //             {
+    //                 return block;
+    //             }
+    //             block = get_next_free_block(block);
+    //         }
+    //     }
+
+    //     current_list++; // Move to the next list
+    // }
+    // printf("Returned NULL\n");
+    // print_free_list();
     return NULL; // no fit found
 }
 
@@ -987,16 +1063,18 @@ static void print_free_list()
     printf("FREELIST DUMP vvv\n");
     block_t **current_list = bins->small_bins;
     block_t **end = ((bins->small_bins) + NUM_SMALL_BINS + NUM_LARGE_BINS);
+    int counter = 0;
     while (current_list != end)
     {
         // Traverse this list
         block_t *current = *current_list;
         while (current != NULL)
         {
+            printf("Bin %d: ", counter);
             print_block(current);
             current = get_next_free_block(current);
         }
-
+        counter++;
         current_list++; // Move to the next list
     }
 }
@@ -1004,6 +1082,7 @@ static void print_free_list()
 static void insert_free_block(block_t **list, block_t *block)
 {
     dbg_printf("Insertion of block: %p\n", block);
+
     if (*list == NULL)
     {
         if (get_sixteen(block))
@@ -1137,13 +1216,12 @@ static bool get_prev_alloc(block_t *block)
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc)
 {
     block_t *next_block = find_next(block);
-    word_t new_header = pack(get_size(next_block), get_prev_sixteen(next_block), get_sixteen(next_block), prev_alloc, get_alloc(next_block));
-    next_block->header = new_header;
+    write_prev_alloc(next_block, prev_alloc);
 }
 
 static void write_prev_alloc(block_t *block, bool prev_alloc)
 {
-    block->header = get_size(block) | (prev_alloc << 1) | get_alloc(block);
+    block->header = (block->header & ~prev_alloc_mask) | (prev_alloc << 1);
 }
 
 /* Segregated List Helper Functions ---------- */
@@ -1175,9 +1253,11 @@ static size_t large_idx(size_t size)
 static void small_bin_insert(block_t *block)
 {
     size_t size = get_size(block);
-    int small_list_idx = small_idx(size);
+    size_t small_list_idx = small_idx(size);
     block_t **list_head = &bins->small_bins[small_list_idx];
     insert_free_block(list_head, block);
+    set_ith_bit(small_list_idx);
+    // printf("Small Set Bit: #%zu, Bit_Vector: %llx\n", small_list_idx, (long long unsigned int)skip_vector);
 }
 
 static void large_bin_insert(block_t *block)
@@ -1186,6 +1266,10 @@ static void large_bin_insert(block_t *block)
     size_t large_list_idx = large_idx(size);
     block_t **list_head = &bins->large_bins[large_list_idx];
     insert_free_block(list_head, block);
+    size_t set_idx = large_list_idx + (word_t)NUM_SMALL_BINS;
+    set_ith_bit(set_idx);
+    // printf("large_list_idx: %zu\n", large_list_idx);
+    // printf("Large Set Bit: #%zu, Bit_Vector: %llx\n", set_idx, (long long unsigned int)skip_vector);
 }
 
 // Inserts into a block into some seg list
@@ -1249,14 +1333,9 @@ static bool get_prev_sixteen(block_t *block)
     return !!(block->header & prev_sixteen_mask);
 }
 
-static void write_sixteen(block_t *block, bool sixteen)
-{
-    block->header = get_size(block) | get_prev_sixteen(block) << 3 | sixteen << 2 | get_prev_alloc(block) << 1 | get_alloc(block);
-}
-
 static void write_prev_sixteen(block_t *block, bool prev_sixteen)
 {
-    block->header = get_size(block) | prev_sixteen << 3 | get_sixteen(block) << 2 | get_prev_alloc(block) << 1 | get_alloc(block);
+    block->header = (block->header & ~prev_sixteen_mask) | (prev_sixteen << 3);
 }
 
 static void write_prev_sixteen_of_next_block(block_t *block, bool prev_sixteen)
@@ -1296,4 +1375,47 @@ static block_t *get_prev_free_block(block_t *block)
         return get_sixteen_prev_ptr(block);
     }
     return block->prev;
+}
+
+static void set_ith_bit(word_t idx)
+{
+    word_t mask = (word_t)1 << idx;
+    skip_vector |= mask;
+}
+
+static void clear_ith_bit(word_t idx)
+{
+    word_t mask = ~((word_t)1 << idx);
+    skip_vector &= mask;
+}
+
+/**
+ * @brief Get the ith bit of skip_vector, 
+ * zero-indexed from least significant bits.
+ * 
+ * @param idx 
+ * @return word_t 
+ */
+static word_t get_ith_bit(word_t idx)
+{
+    word_t mask = 0x1;
+    return (skip_vector >> idx) & mask;
+}
+
+/**
+ * @brief Starting from but not including the ith index,
+ * find the next set bit. Returns -1 if no more set bits are left.
+ * 
+ * @param idx 
+ * @return word_t 
+ */
+static int next_set_bit(word_t idx)
+{
+    // Prevents edge case where 0x8000000000000001 loops forever
+    if (idx == 63)
+    {
+        return -1;
+    }
+    word_t search_word = skip_vector >> (idx + 1) << (idx + 1);
+    return __builtin_ffsll(search_word) - 1;
 }
