@@ -63,7 +63,6 @@
 #endif
 
 #include <math.h>
-#include <unistd.h>
 
 /* Basic constants */
 typedef uint64_t word_t;
@@ -78,8 +77,8 @@ static const word_t sixteen_mask = 0x4;
 static const word_t prev_sixteen_mask = 0x8;
 static const word_t size_mask = ~(word_t)0xF;
 
-#define NUM_SMALL_BINS 240
-#define NUM_LARGE_BINS 16
+#define NUM_SMALL_BINS 256
+#define NUM_LARGE_BINS 32
 
 static size_t MIN_SMALL_BIN_SIZE;
 static size_t MAX_SMALL_BIN_SIZE;
@@ -604,14 +603,10 @@ static block_t *find_fit(size_t asize)
         list = &bins->small_bins[idx];
         in_small_bin = true;
     }
-    else if (is_large(asize))
+    else
     {
         size_t idx = large_idx(asize);
         list = &bins->large_bins[idx];
-    }
-    else
-    {
-        printf("Block is not large or small!");
     }
 
     // We've found a list to start searching in. Search it then keep moving up.
@@ -640,7 +635,7 @@ static block_t *find_fit(size_t asize)
             block_t *block = *current_list;
             while (block != NULL)
             {
-                if (!(get_alloc(block)) && (asize <= get_size(block)))
+                if ((asize <= get_size(block)))
                 {
                     return block;
                 }
@@ -1012,7 +1007,8 @@ static void insert_free_block(block_t **list, block_t *block)
         if (get_sixteen(block))
         {
             // Write the next pointer as the header and the prev pointer in block->next
-            write_header(block, 0, get_prev_sixteen(block), true, get_prev_alloc(block), get_alloc(block));
+            // write_header(block, 0, get_prev_sixteen(block), true, get_prev_alloc(block), get_alloc(block));
+            block->header = block->header & (word_t)0xF;
             block->next = NULL;
             *list = block;
         }
@@ -1243,12 +1239,12 @@ static void remove_block(block_t *block)
 
 static bool get_sixteen(block_t *block)
 {
-    return !!(block->header & sixteen_mask);
+    return (block->header & sixteen_mask);
 }
 
 static bool get_prev_sixteen(block_t *block)
 {
-    return !!(block->header & prev_sixteen_mask);
+    return (block->header & prev_sixteen_mask);
 }
 
 static void write_prev_sixteen(block_t *block, bool prev_sixteen)
