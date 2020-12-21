@@ -69,8 +69,7 @@
 #endif /* def DRIVER */
 
 /* You can change anything from here onward */
-#include <math.h>   // Import math to use log2l() when calculating large_idx
-
+#include <math.h> // Import math to use log2l() when calculating large_idx
 
 /*
  * If DEBUG is defined, enable printing on dbg_printf and contracts.
@@ -92,7 +91,6 @@
 #define dbg_assert(...)
 #define dbg_ensures(...)
 #endif
-
 
 /* Basic constants */
 typedef uint64_t word_t;
@@ -168,6 +166,7 @@ static block_t *extend_heap(size_t size);
 static void place(block_t *block, size_t asize);
 static block_t *find_fit(size_t asize);
 static block_t *coalesce(block_t *block);
+static void write_coalesce_header(block_t *block, size_t new_size);
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
@@ -199,7 +198,7 @@ static bool get_prev_alloc(block_t *block);
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc);
 static void write_prev_alloc(block_t *block, bool prev_alloc);
 
-static void insert_free_block(block_t **list, block_t *block); 
+static void insert_free_block(block_t **list, block_t *block);
 static void remove_free_block(block_t **list, block_t *block);
 
 static bool is_small(size_t size);
@@ -340,7 +339,7 @@ void free(void *bp)
     dbg_printf("Free this block: %p\n", block);
 
     // Clear the alloc bit of the header. 16-byte blocks lack a footer.
-    block->header = block->header & ~alloc_mask;
+    block->header &= ~alloc_mask;
     if (size != min_block_size)
     {
         write_header_to_footer(block, size);
@@ -453,9 +452,11 @@ static block_t *extend_heap(size_t size)
     // Initialize metadata of the newly created free block
     block_t *block = payload_to_header(bp);
     bool is_size_sixteen = size == min_block_size;
-    bool old_prev_sixteen = get_prev_sixteen(block);
-    bool old_prev_alloc = get_prev_alloc(block);
-    write_header(block, size, old_prev_sixteen, is_size_sixteen, old_prev_alloc, false);
+
+    block->header |= alloc_mask;
+    block->header |= (is_size_sixteen << sixteen_bit_offset);
+    block->header = (block->header & ~size_mask) | size;
+
     write_header_to_footer(block, size);
 
     // Create new epilogue header
@@ -483,7 +484,6 @@ static block_t *extend_heap(size_t size)
 static block_t *coalesce(block_t *block)
 {
     // 4 Possible Cases
-    size_t current_size = get_size(block);
     block_t *next_block = find_next(block);
 
     // Edge cases? Consider at the ends
@@ -520,16 +520,15 @@ static block_t *coalesce(block_t *block)
         dbg_printf("Coalesce with next block\n");
 
         // Grab metadata
+        size_t current_size = get_size(block);
         size_t next_size = get_size(next_block);
         size_t new_size = current_size + next_size;
-        bool old_prev_sixteen = get_prev_sixteen(block);
-        bool old_prev_alloc = get_prev_alloc(block);
 
         // Splice out the next block from free_list
         remove_block(next_block);
 
         // Create/Update header and footer
-        write_header(block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
+        write_coalesce_header(block, new_size);
         write_header_to_footer(block, new_size);
         write_prev_sixteen_of_next_block(block, false);
         return block;
@@ -539,10 +538,9 @@ static block_t *coalesce(block_t *block)
         /* Coalesce with the previous block */
 
         // Grab metadata
+        size_t current_size = get_size(block);
         block_t *prev_block = find_prev(block);
         size_t prev_size = get_size(prev_block);
-        bool old_prev_sixteen = get_prev_sixteen(prev_block);
-        bool old_prev_alloc = get_prev_alloc(prev_block);
         size_t new_size = current_size + prev_size;
 
         dbg_printf("Coalesce with previous, block: %p. prev-block: %p\n", block, prev_block);
@@ -551,9 +549,8 @@ static block_t *coalesce(block_t *block)
         remove_block(prev_block);
 
         // Create/Update header and footer
-        write_header(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
+        write_coalesce_header(prev_block, new_size);
         write_header_to_footer(prev_block, new_size);
-
 
         // The next block is always allocated. Thus, only update next's header.
         write_prev_alloc_of_next_block(prev_block, false);
@@ -567,19 +564,18 @@ static block_t *coalesce(block_t *block)
         dbg_printf("Coalesce 3\n");
 
         // Grab metadata
+        size_t current_size = get_size(block);
         block_t *prev_block = find_prev(block);
         size_t prev_size = get_size(prev_block);
         size_t next_size = get_size(next_block);
         size_t new_size = prev_size + current_size + next_size;
-        bool old_prev_sixteen = get_prev_sixteen(prev_block);
-        bool old_prev_alloc = get_prev_alloc(prev_block);
 
         // List Manipulation
         remove_block(next_block);
         remove_block(prev_block);
 
         // Update the header and footer of the new merged free block
-        write_header(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
+        write_coalesce_header(prev_block, new_size);
         write_header_to_footer(prev_block, new_size);
 
         // The next block is always allocated. Thus, only update next's header.
@@ -590,9 +586,28 @@ static block_t *coalesce(block_t *block)
     }
 }
 
-/*
- * <what does place do?>
- * block is the free block we are allocating within. asize is the bytes we need.
+/**
+ * @brief Efficiently alters the header of a merged block created
+ *          in coalesce.
+ * 
+ * 
+ * @param block - the merged block created by coalesce
+ * @param new_size - the new size of the merged block
+ */
+static void write_coalesce_header(block_t *block, size_t new_size)
+{
+    block->header &= ~alloc_mask;
+    block->header &= ~sixteen_mask;
+    block->header = (block->header & ~size_mask) | (new_size);
+}
+
+/**
+ * @brief Allocates a block of asize bytes within a passed free block
+ *          that is the same size or larger.
+ *          
+ * 
+ * @param block - The freeblock we will allocate within
+ * @param asize - The number of bytes we are going to allocate
  */
 static void place(block_t *block, size_t asize)
 {
@@ -608,10 +623,11 @@ static void place(block_t *block, size_t asize)
 
         // Allocation, remove the free block
         bool allocated_block_is_sixteen = asize == min_block_size;
-        bool old_prev_sixteen = get_prev_sixteen(block);
-        bool old_prev_alloc = get_prev_alloc(block);
         remove_block(block);
-        write_header(block, asize, old_prev_sixteen, allocated_block_is_sixteen, old_prev_alloc, true);
+
+        block->header |= alloc_mask;
+        block->header |= (allocated_block_is_sixteen << sixteen_bit_offset);
+        block->header = (block->header & ~size_mask) | asize;
 
         // Construct and insert the leftover free block
         block_next = find_next(block);
@@ -621,7 +637,7 @@ static void place(block_t *block, size_t asize)
         write_header(block_next, csize - asize, allocated_block_is_sixteen, free_block_is_sixteen, true, false);
         if (!free_block_is_sixteen)
         {
-            write_header_to_footer(block_next, csize - asize);          
+            write_header_to_footer(block_next, csize - asize);
         }
         else
         {
@@ -687,7 +703,6 @@ static block_t *find_fit(size_t asize)
             {
                 return block;
             }
-            
         }
         else
         {
@@ -961,7 +976,6 @@ static void write_header_to_footer(block_t *block, size_t size)
     *footerp = block->header;
 }
 
-
 /*
  * find_next: returns the next consecutive block on the heap by adding the
  *            size of the block.
@@ -1229,7 +1243,6 @@ static void remove_free_block(block_t **list, block_t *block)
     }
 }
 
-
 /* vvvvvvvvvvvvvvvvvvvvvvvv Removing Footer Functions vvvvvvvvvvvvvvvvvvvvvvvv */
 /**
  * @brief Returns the prev_alloc bit from a block's header.
@@ -1263,8 +1276,6 @@ static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc)
     block_t *next_block = find_next(block);
     write_prev_alloc(next_block, prev_alloc);
 }
-
-
 
 /* vvvvvvvvvvvvvvvvvv Segregated List Helper Functions vvvvvvvvvvvvvvvvvv */
 /**
@@ -1358,7 +1369,6 @@ static void insert_block(block_t *block)
     {
         large_bin_insert(block, size);
     }
-
 }
 
 /**
@@ -1403,9 +1413,7 @@ static void remove_block(block_t *block)
     {
         large_bin_remove(block, size);
     }
-
 }
-
 
 /* vvvvvvvvvvvvvvvvvvvvv 16 Byte Min-Block Size Functions vvvvvvvvvvvvvvvvvvvvvvv*/
 /**
