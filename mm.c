@@ -101,7 +101,6 @@ static const size_t dsize = 2 * sizeof(word_t);          // double word size (by
 static const size_t min_block_size = 2 * sizeof(word_t); // Minimum block size
 static const size_t chunksize = (1 << 12);               // requires (chunksize % 16 == 0)
 
-static const word_t alloc_bit_offset = 0;
 static const word_t prev_alloc_bit_offset = 1;
 static const word_t sixteen_bit_offset = 2;
 static const word_t prev_sixteen_bit_offset = 3;
@@ -112,8 +111,8 @@ static const word_t sixteen_mask = 0x4;
 static const word_t prev_sixteen_mask = 0x8;
 static const word_t size_mask = ~(word_t)0xF;
 
-#define NUM_SMALL_BINS 256
-#define NUM_LARGE_BINS 32
+#define NUM_SMALL_BINS 240
+#define NUM_LARGE_BINS 16
 
 static size_t MIN_SMALL_BIN_SIZE;
 static size_t MAX_SMALL_BIN_SIZE;
@@ -183,6 +182,7 @@ static bool get_alloc(block_t *block);
 
 static void write_header(block_t *block, size_t size, bool prev_sixteen, bool sixteen, bool prev_alloc, bool alloc);
 static void write_footer(block_t *block, size_t size, bool prev_sixteen, bool sixteen, bool prev_alloc, bool alloc);
+static void write_header_to_footer(block_t *block, size_t size);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -267,8 +267,9 @@ bool mm_init(void)
     }
 
     // Write the metadata
-    write_header(first_ever_block, get_size(first_ever_block), false, false, true, false);
-    write_footer(first_ever_block, get_size(first_ever_block), false, false, true, false);
+    size_t size = get_size(first_ever_block);
+    write_header(first_ever_block, size, false, false, true, false);
+    write_header_to_footer(first_ever_block, size);
 
     insert_block(first_ever_block);
 
@@ -338,14 +339,11 @@ void free(void *bp)
 
     dbg_printf("Free this block: %p\n", block);
 
-    // Write the metadata of the freed block. 16-byte blocks lack a footer.
-    bool is_size_sixteen = size == min_block_size;
-    bool old_prev_sixteen = get_prev_sixteen(block);
-    bool old_prev_alloc = get_prev_alloc(block);
-    write_header(block, size, old_prev_sixteen, is_size_sixteen, old_prev_alloc, false);
-    if (!is_size_sixteen)
+    // Clear the alloc bit of the header. 16-byte blocks lack a footer.
+    block->header = block->header & ~alloc_mask;
+    if (size != min_block_size)
     {
-        write_footer(block, size, old_prev_sixteen, is_size_sixteen, old_prev_alloc, false);
+        write_header_to_footer(block, size);
     }
 
     block_t *coalesce_ptr = coalesce(block);
@@ -458,7 +456,7 @@ static block_t *extend_heap(size_t size)
     bool old_prev_sixteen = get_prev_sixteen(block);
     bool old_prev_alloc = get_prev_alloc(block);
     write_header(block, size, old_prev_sixteen, is_size_sixteen, old_prev_alloc, false);
-    write_footer(block, size, old_prev_sixteen, is_size_sixteen, old_prev_alloc, false);
+    write_header_to_footer(block, size);
 
     // Create new epilogue header
     block_t *block_next = find_next(block);
@@ -532,7 +530,7 @@ static block_t *coalesce(block_t *block)
 
         // Create/Update header and footer
         write_header(block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
-        write_footer(block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
+        write_header_to_footer(block, new_size);
         write_prev_sixteen_of_next_block(block, false);
         return block;
     }
@@ -554,7 +552,8 @@ static block_t *coalesce(block_t *block)
 
         // Create/Update header and footer
         write_header(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
-        write_footer(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
+        write_header_to_footer(prev_block, new_size);
+
 
         // The next block is always allocated. Thus, only update next's header.
         write_prev_alloc_of_next_block(prev_block, false);
@@ -581,7 +580,7 @@ static block_t *coalesce(block_t *block)
 
         // Update the header and footer of the new merged free block
         write_header(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
-        write_footer(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
+        write_header_to_footer(prev_block, new_size);
 
         // The next block is always allocated. Thus, only update next's header.
         write_prev_alloc_of_next_block(prev_block, false);
@@ -622,7 +621,7 @@ static void place(block_t *block, size_t asize)
         write_header(block_next, csize - asize, allocated_block_is_sixteen, free_block_is_sixteen, true, false);
         if (!free_block_is_sixteen)
         {
-            write_footer(block_next, csize - asize, allocated_block_is_sixteen, free_block_is_sixteen, true, false);
+            write_header_to_footer(block_next, csize - asize);          
         }
         else
         {
@@ -638,11 +637,8 @@ static void place(block_t *block, size_t asize)
         /* No splitting required. Therefore remove from free list */
         remove_block(block);
 
-        // Allocation
-        bool is_sixteen = get_sixteen(block);
-        bool old_prev_sixteen = get_prev_sixteen(block);
-        bool old_prev_alloc = get_prev_alloc(block);
-        write_header(block, csize, old_prev_sixteen, is_sixteen, old_prev_alloc, true);
+        // Allocation by setting the alloc bit
+        block->header |= alloc_mask;
 
         // The next block is assumed to be allocated
         write_prev_alloc_of_next_block(block, true);
@@ -952,6 +948,19 @@ static void write_footer(block_t *block, size_t size, bool prev_sixteen, bool si
     word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
     *footerp = pack(size, prev_sixteen, sixteen, prev_alloc, alloc);
 }
+
+/**
+ * @brief Copies the header to the footer.
+ * 
+ * @param block - The block to write the footer on
+ * @param size - Size of the passed block
+ */
+static void write_header_to_footer(block_t *block, size_t size)
+{
+    word_t *footerp = (word_t *)((block->payload) + size - dsize);
+    *footerp = block->header;
+}
+
 
 /*
  * find_next: returns the next consecutive block on the heap by adding the
