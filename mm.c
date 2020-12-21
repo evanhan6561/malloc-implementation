@@ -1,11 +1,13 @@
 /*
  ******************************************************************************
- *                               mm.c                                         *
- *           64-bit struct-based implicit free list memory allocator          *
- *                      without coalesce functionality                        *
- *                 CSE 361: Introduction to Computer Systems                  *
- *                                                                            *
+ *                               mm.c                                         
+ *           64-bit struct-based segregated explicit free list memory allocator          
+ *                                          
+ *                 CSE 361: Introduction to Computer Systems                  
+ *                                                                            
  *  ************************************************************************  *
+ *      Implementation Details:
+ * 
  *      Segregated Explicit Free Lists
  *          Each individual bin is an explicit free list, a list that
  *          holds free blocks.         
@@ -601,7 +603,8 @@ static void place(block_t *block, size_t asize)
 
     if ((csize - asize) >= min_block_size)
     {
-        // Splitting a free block into allocated | split
+        /* Splitting a free block into allocated | split-freeblock */
+
         block_t *block_next;
 
         // Allocation, remove the free block
@@ -632,7 +635,7 @@ static void place(block_t *block, size_t asize)
 
     else
     {
-        // No splitting required. Therefore remove from free list
+        /* No splitting required. Therefore remove from free list */
         remove_block(block);
 
         // Allocation
@@ -650,7 +653,7 @@ static void place(block_t *block, size_t asize)
  * <what does find_fit do?>
  * Finds a free block that can fit asize.
  * 
- * Currently, Next-Fit implementation
+ * Currently, First-Fit implementation
  */
 static block_t *find_fit(size_t asize)
 {
@@ -1105,6 +1108,9 @@ static void insert_free_block(block_t **list, block_t *block)
 
     if (get_sixteen(block))
     {
+        // We have 4 bits of metadata, hence 0xF. B/c 16 byte blocks
+        // store their next ptr in the same position as their header,
+        // the metadata bits must be spliced on.
         word_t bits = block->header & (word_t)0xF;
         block->header = ((word_t)*list & size_mask) | bits;
         block->next = NULL;
@@ -1304,7 +1310,8 @@ static size_t large_idx(size_t size)
 /**
  * @brief Inserts a block into a small bin. Helper function to insert_block
  * 
- * @param block 
+ * @param block
+ * @param size 
  */
 static void small_bin_insert(block_t *block, size_t size)
 {
@@ -1317,6 +1324,7 @@ static void small_bin_insert(block_t *block, size_t size)
  * @brief Inserts a block into a large bin. Helper function to insert_block
  * 
  * @param block 
+ * @param size
  */
 static void large_bin_insert(block_t *block, size_t size)
 {
@@ -1348,6 +1356,7 @@ static void insert_block(block_t *block)
  * @brief Removes a block from a small bin. Helper function to remove_block().
  * 
  * @param block 
+ * @param size
  */
 static void small_bin_remove(block_t *block, size_t size)
 {
@@ -1360,6 +1369,7 @@ static void small_bin_remove(block_t *block, size_t size)
  * @brief Removes a block from a large bin. Helper function to remove_block().
  * 
  * @param block 
+ * @param size
  */
 static void large_bin_remove(block_t *block, size_t size)
 {
