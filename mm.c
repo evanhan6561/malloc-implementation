@@ -6,8 +6,35 @@
  *                 CSE 361: Introduction to Computer Systems                  *
  *                                                                            *
  *  ************************************************************************  *
- *                     insert your documentation here. :)                     *
- *                                                                            *
+ *      Segregated Explicit Free Lists
+ *          Each individual bin is an explicit free list, a list that
+ *          holds free blocks.         
+ * 
+ *          Small Bins hold only a single block size
+ * 
+ *          Large bins hold power of two ranges.
+ *              i.e. The first large bin can hold 1 block size, the 
+ *              second large bin can hold 2 block sizes, the third 4...
+ * 
+ *          The last large bin holds any blocks too large to fit into
+ *          any other bin.
+ * 
+ *      Removed Footer
+ *          Allocated Blocks no longer have a footer. The second 
+ *          least significant bit of the
+ *          header is devoted to a prev-alloc bit which enables this.
+ * 
+ *      16 Byte Minimum Block Size
+ *          Optimization for payloads of size 1-8. Typically, the 
+ *          minimum block size is 32 because a free block is composed of
+ *          an 8 byte header, 8 byte next pointer, 8 byte prev pointer,
+ *          and 8 byte footer.
+ *          However, the 3rd least significant bit of the header has
+ *          been devoted to an "is size 16" indicator. 
+ *          Additionally, the 4th least significant bit of the header
+ *          has been devoted to a "previous block is size 16" indicator.
+ * 
+ *                                                                            
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
  *  Step 0: Please read the writeup!                                          *
@@ -40,6 +67,8 @@
 #endif /* def DRIVER */
 
 /* You can change anything from here onward */
+#include <math.h>   // Import math to use log2l() when calculating large_idx
+
 
 /*
  * If DEBUG is defined, enable printing on dbg_printf and contracts.
@@ -55,14 +84,13 @@
 #define dbg_assert(...) assert(__VA_ARGS__)
 #define dbg_ensures(...) assert(__VA_ARGS__)
 #else
-/* When debugging is disnabled, no code gets generated for these */
+/* When debugging is disabled, no code gets generated for these */
 #define dbg_printf(...)
 #define dbg_requires(...)
 #define dbg_assert(...)
 #define dbg_ensures(...)
 #endif
 
-#include <math.h>
 
 /* Basic constants */
 typedef uint64_t word_t;
@@ -70,6 +98,11 @@ static const size_t wsize = sizeof(word_t);              // word and header size
 static const size_t dsize = 2 * sizeof(word_t);          // double word size (bytes)
 static const size_t min_block_size = 2 * sizeof(word_t); // Minimum block size
 static const size_t chunksize = (1 << 12);               // requires (chunksize % 16 == 0)
+
+static const word_t alloc_bit_offset = 0;
+static const word_t prev_alloc_bit_offset = 1;
+static const word_t sixteen_bit_offset = 2;
+static const word_t prev_sixteen_bit_offset = 3;
 
 static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
@@ -84,6 +117,19 @@ static size_t MIN_SMALL_BIN_SIZE;
 static size_t MAX_SMALL_BIN_SIZE;
 static size_t MIN_LARGE_BIN_SIZE;
 
+/**
+ * @brief The structure of normal blocks. 
+ * 
+ *          16-byte blocks are the same type but their members are organized differently.
+ *          Namely, their header is actually their block_t *next member
+ *          And their next ptr is actually their block_t *prev member
+ * 
+ *          However, a 16-byte block's next member variable also stores metadata in the last 4 bits,
+ *          and should only be handled by helper functions designed for 16-byte blocks.
+ * 
+ *          In summary, the provided helper functions should be used when handling
+ *          16-byte blocks.
+ */
 typedef struct block block_t;
 struct block
 {
@@ -111,8 +157,7 @@ typedef struct Bins
 } Bins;
 
 /* Global variables */
-/* Pointer to first block */
-static block_t *heap_start = NULL; // Start of heap
+static block_t *heap_start = NULL; // Pointer to the very first block
 static Bins *bins = NULL;          // Pointers to segregated lists
 
 bool mm_checkheap(int lineno);
@@ -152,18 +197,18 @@ static bool get_prev_alloc(block_t *block);
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc);
 static void write_prev_alloc(block_t *block, bool prev_alloc);
 
-static void insert_free_block(block_t **list, block_t *block); // Helper function
-static void remove_free_block(block_t **list, block_t *block); // Helper function
+static void insert_free_block(block_t **list, block_t *block); 
+static void remove_free_block(block_t **list, block_t *block);
 
 static bool is_small(size_t size);
 static bool is_large(size_t size);
 static size_t small_idx(size_t size);
 static size_t large_idx(size_t size);
-static void small_bin_insert(block_t *block);
-static void large_bin_insert(block_t *block);
+static void small_bin_insert(block_t *block, size_t size);
+static void large_bin_insert(block_t *block, size_t size);
 static void insert_block(block_t *block); // Inserts into a block into some seg list
-static void small_bin_remove(block_t *block);
-static void large_bin_remove(block_t *block);
+static void small_bin_remove(block_t *block, size_t size);
+static void large_bin_remove(block_t *block, size_t size);
 static void remove_block(block_t *block);
 
 static bool get_sixteen(block_t *block);
@@ -176,7 +221,8 @@ static block_t *get_next_free_block(block_t *block);
 static block_t *get_prev_free_block(block_t *block);
 
 /*
- * <what does mm_init do?>
+ * Initializes the heap by allocating space for helping data structures and
+ * starting space for users.
  */
 bool mm_init(void)
 {
@@ -185,7 +231,7 @@ bool mm_init(void)
     MAX_SMALL_BIN_SIZE = MIN_SMALL_BIN_SIZE + (NUM_SMALL_BINS - 1) * dsize;
     MIN_LARGE_BIN_SIZE = MAX_SMALL_BIN_SIZE + dsize;
 
-    // Allocate and zero initialize bins
+    // Allocate and zero initialize the segregated lists
     bins = (Bins *)mem_sbrk(sizeof(Bins));
     size_t i;
     for (i = 0; i < NUM_SMALL_BINS; i++)
@@ -218,6 +264,7 @@ bool mm_init(void)
         return false;
     }
 
+    // Write the metadata
     write_header(first_ever_block, get_size(first_ever_block), false, false, true, false);
     write_footer(first_ever_block, get_size(first_ever_block), false, false, true, false);
 
@@ -289,7 +336,7 @@ void free(void *bp)
 
     dbg_printf("Free this block: %p\n", block);
 
-    // Write the header/footer of the data. 16-byte blocks lack a footer.
+    // Write the metadata of the freed block. 16-byte blocks lack a footer.
     bool is_size_sixteen = size == min_block_size;
     bool old_prev_sixteen = get_prev_sixteen(block);
     bool old_prev_alloc = get_prev_alloc(block);
@@ -303,8 +350,13 @@ void free(void *bp)
     insert_block(coalesce_ptr);
 }
 
-/*
- * <what does realloc do?>
+/**
+ * @brief Changes the size of an already allocated block of memory and
+ *          returns a pointer to its new position.
+ * 
+ * @param ptr Pointer to the already allocated payload created by malloc
+ * @param size New size of the allocated block.
+ * @return (void*) Pointer to the payload of the resized block
  */
 void *realloc(void *ptr, size_t size)
 {
@@ -348,8 +400,12 @@ void *realloc(void *ptr, size_t size)
     return newptr;
 }
 
-/*
- * <what does calloc do?>
+/**
+ * @brief Allocates contiguous memory to hold a number of elements.
+ * 
+ * @param elements The number of elements to allocate for
+ * @param size Size of each element in bytes
+ * @return (void*) Pointer to the start of the payload
  */
 void *calloc(size_t elements, size_t size)
 {
@@ -377,9 +433,7 @@ void *calloc(size_t elements, size_t size)
 /******** The remaining content below are helper and debug routines ********/
 
 /*
- * <what does extend_heap do?>
- * Extends the heap by size bytes, which may trigger coalesce().
- * Returns a pointer to the last free block.
+ * Extends the heap by size bytes and returns a pointer to the last free block.
  * 
  * Implementation:
  * Always repurposes the dummy epilogue into the header of the last free block
@@ -389,14 +443,14 @@ static block_t *extend_heap(size_t size)
     dbg_printf("Extend Heap by %zu!", size);
     void *bp;
 
-    // Allocate an even number of words to maintain alignment
+    // Allocate a free block made of an even number of words to maintain alignment
     size = round_up(size, dsize);
     if ((bp = mem_sbrk(size)) == (void *)-1)
     {
         return NULL;
     }
 
-    // Initialize free block header/footer
+    // Initialize metadata of the newly created free block
     block_t *block = payload_to_header(bp);
     bool is_size_sixteen = size == min_block_size;
     bool old_prev_sixteen = get_prev_sixteen(block);
@@ -419,10 +473,12 @@ static block_t *extend_heap(size_t size)
     return coalesce_ptr;
 }
 
-/*
- * <what does coalesce do?>
- * Assumes that the passed block is free?
- * Merge with adjacent blocks if they are free
+/**
+ * @brief Merges adjacent free blocks into a single free block and returns
+ *          a pointer to the resultant block
+ * 
+ * @param block 
+ * @return block_t* 
  */
 static block_t *coalesce(block_t *block)
 {
@@ -434,6 +490,7 @@ static block_t *coalesce(block_t *block)
     bool prev_is_allocated = get_prev_alloc(block);
     bool next_is_allocated = get_alloc(next_block);
 
+    // Edge cases, attempts to coalesce with the "walls" of a heap should fail.
     if (block == next_block)
     {
         dbg_printf("Coalesce at right edge of heap. %p\n", block);
@@ -462,7 +519,7 @@ static block_t *coalesce(block_t *block)
         /* Coalesce with next block */
         dbg_printf("Coalesce with next block\n");
 
-        // First grab metadata
+        // Grab metadata
         size_t next_size = get_size(next_block);
         size_t new_size = current_size + next_size;
         bool old_prev_sixteen = get_prev_sixteen(block);
@@ -479,8 +536,9 @@ static block_t *coalesce(block_t *block)
     }
     else if (!prev_is_allocated && next_is_allocated)
     {
-        // Coalesce with the previous block
+        /* Coalesce with the previous block */
 
+        // Grab metadata
         block_t *prev_block = find_prev(block);
         size_t prev_size = get_size(prev_block);
         bool old_prev_sixteen = get_prev_sixteen(prev_block);
@@ -496,6 +554,7 @@ static block_t *coalesce(block_t *block)
         write_header(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
         write_footer(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
 
+        // The next block is always allocated. Thus, only update next's header.
         write_prev_alloc_of_next_block(prev_block, false);
         write_prev_sixteen_of_next_block(prev_block, false);
 
@@ -503,9 +562,10 @@ static block_t *coalesce(block_t *block)
     }
     else
     {
-        // Merge all 3 blocks
+        /* Coalesce all 3 blocks */
         dbg_printf("Coalesce 3\n");
 
+        // Grab metadata
         block_t *prev_block = find_prev(block);
         size_t prev_size = get_size(prev_block);
         size_t next_size = get_size(next_block);
@@ -517,11 +577,11 @@ static block_t *coalesce(block_t *block)
         remove_block(next_block);
         remove_block(prev_block);
 
-        // Create/Update header and footer
+        // Update the header and footer of the new merged free block
         write_header(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
         write_footer(prev_block, new_size, old_prev_sixteen, false, old_prev_alloc, false);
 
-        // Only write to the next block's header b/c it
+        // The next block is always allocated. Thus, only update next's header.
         write_prev_alloc_of_next_block(prev_block, false);
         write_prev_sixteen_of_next_block(prev_block, false);
 
@@ -817,7 +877,7 @@ static size_t round_up(size_t size, size_t n)
  */
 static word_t pack(size_t size, bool prev_sixteen, bool sixteen, bool prev_alloc, bool alloc)
 {
-    return size | prev_sixteen << 3 | sixteen << 2 | prev_alloc << 1 | alloc;
+    return size | prev_sixteen << prev_sixteen_bit_offset | sixteen << sixteen_bit_offset | prev_alloc << prev_alloc_bit_offset | alloc;
 }
 
 /*
@@ -946,7 +1006,11 @@ static void *header_to_payload(block_t *block)
     return (void *)(block->payload);
 }
 
-// Traverse the heap and print it out.
+/**
+ * @brief Prints associated metadata of a block
+ * 
+ * @param block 
+ */
 static void print_block(block_t *block)
 {
     if (!get_alloc(block))
@@ -968,6 +1032,11 @@ static void print_block(block_t *block)
                block, get_size(block), get_prev_sixteen(block), get_sixteen(block), get_prev_alloc(block), get_alloc(block));
     }
 }
+
+/**
+ * @brief Prints every block on the heap using implicit traversal.
+ * 
+ */
 static void print_heap()
 {
     printf("HEAP DUMP\n");
@@ -977,6 +1046,11 @@ static void print_heap()
         print_block(block);
     }
 }
+
+/**
+ * @brief Prints every single block held in the segregated lists.
+ * 
+ */
 static void print_free_list()
 {
     printf("FREELIST DUMP vvv\n");
@@ -998,6 +1072,13 @@ static void print_free_list()
     }
 }
 
+/**
+ * @brief Inserts a free block into the passed free list.
+ *          Helper function, never called directly.
+ * 
+ * @param list 
+ * @param block 
+ */
 static void insert_free_block(block_t **list, block_t *block)
 {
     dbg_printf("Insertion of block: %p\n", block);
@@ -1006,8 +1087,9 @@ static void insert_free_block(block_t **list, block_t *block)
     {
         if (get_sixteen(block))
         {
-            // Write the next pointer as the header and the prev pointer in block->next
-            // write_header(block, 0, get_prev_sixteen(block), true, get_prev_alloc(block), get_alloc(block));
+            // 16 byte-blocks have a different anatomy than normal blocks.
+            // Their next ptr is actually stored in the header position and
+            // their prev ptr is store in the next position
             block->header = block->header & (word_t)0xF;
             block->next = NULL;
             *list = block;
@@ -1049,7 +1131,12 @@ static void insert_free_block(block_t **list, block_t *block)
     }
 }
 
-// Removes a specified free block from freelist
+/**
+ * @brief Removes a free block from a specified free list.
+ * 
+ * @param list 
+ * @param block 
+ */
 static void remove_free_block(block_t **list, block_t *block)
 {
     dbg_printf("Removal of block: %p\n", block);
@@ -1127,39 +1214,83 @@ static void remove_free_block(block_t **list, block_t *block)
     }
 }
 
-// Returns the prev_alloc bit of a block
+
+/* vvvvvvvvvvvvvvvvvvvvvvvv Removing Footer Functions vvvvvvvvvvvvvvvvvvvvvvvv */
+/**
+ * @brief Returns the prev_alloc bit from a block's header.
+ * 
+ * @param block 
+ */
 static bool get_prev_alloc(block_t *block)
 {
-    return !!(block->header & prev_alloc_mask);
+    return (block->header & prev_alloc_mask);
 }
 
+/**
+ * @brief Overwrites the prev_alloc bit of a block
+ * 
+ * @param block 
+ * @param prev_alloc 
+ */
+static void write_prev_alloc(block_t *block, bool prev_alloc)
+{
+    block->header = (block->header & ~prev_alloc_mask) | (prev_alloc << prev_alloc_bit_offset);
+}
+
+/**
+ * @brief Overwrites the prev_alloc bit of the next adjacent block's header.
+ * 
+ * @param block 
+ * @param prev_alloc Bit value to write
+ */
 static void write_prev_alloc_of_next_block(block_t *block, bool prev_alloc)
 {
     block_t *next_block = find_next(block);
     write_prev_alloc(next_block, prev_alloc);
 }
 
-static void write_prev_alloc(block_t *block, bool prev_alloc)
-{
-    block->header = (block->header & ~prev_alloc_mask) | (prev_alloc << 1);
-}
 
-/* Segregated List Helper Functions ---------- */
+
+/* vvvvvvvvvvvvvvvvvv Segregated List Helper Functions vvvvvvvvvvvvvvvvvv */
+/**
+ * @brief Determines if a passed size would go into a small bin.
+ * 
+ * @param size 
+ */
 static bool is_small(size_t size)
 {
     return size <= MAX_SMALL_BIN_SIZE;
 }
 
+/**
+ * @brief 
+ * 
+ * @param size 
+ * @return true 
+ * @return false 
+ */
 static bool is_large(size_t size)
 {
     return !is_small(size);
 }
 
+/**
+ * @brief Calculates the index of the small bin a block would be placed in.
+ * 
+ * @param size 
+ * @return size_t 
+ */
 static size_t small_idx(size_t size)
 {
     return (size - MIN_SMALL_BIN_SIZE) / dsize;
 }
 
+/**
+ * @brief Calculates the index of the large bin a block would be placed in.
+ * 
+ * @param size 
+ * @return size_t 
+ */
 static size_t large_idx(size_t size)
 {
     size_t idx = log2l(size - MAX_SMALL_BIN_SIZE - dsize) - 4;
@@ -1170,95 +1301,148 @@ static size_t large_idx(size_t size)
     return idx;
 }
 
-static void small_bin_insert(block_t *block)
+/**
+ * @brief Inserts a block into a small bin. Helper function to insert_block
+ * 
+ * @param block 
+ */
+static void small_bin_insert(block_t *block, size_t size)
 {
-    size_t size = get_size(block);
     size_t small_list_idx = small_idx(size);
     block_t **list_head = &bins->small_bins[small_list_idx];
     insert_free_block(list_head, block);
 }
 
-static void large_bin_insert(block_t *block)
+/**
+ * @brief Inserts a block into a large bin. Helper function to insert_block
+ * 
+ * @param block 
+ */
+static void large_bin_insert(block_t *block, size_t size)
 {
-    size_t size = get_size(block);
     size_t large_list_idx = large_idx(size);
     block_t **list_head = &bins->large_bins[large_list_idx];
     insert_free_block(list_head, block);
 }
 
-// Inserts into a block into some seg list
+/**
+ * @brief Inserts a block into the correct bin
+ * 
+ * @param block 
+ */
 static void insert_block(block_t *block)
 {
     size_t size = get_size(block);
     if (is_small(size))
     {
-        small_bin_insert(block);
-    }
-    else if (is_large(size))
-    {
-        large_bin_insert(block);
+        small_bin_insert(block, size);
     }
     else
     {
-        printf("Critical Error! Block is not small or large");
+        large_bin_insert(block, size);
     }
+
 }
 
-static void small_bin_remove(block_t *block)
+/**
+ * @brief Removes a block from a small bin. Helper function to remove_block().
+ * 
+ * @param block 
+ */
+static void small_bin_remove(block_t *block, size_t size)
 {
-    size_t size = get_size(block);
     int small_list_idx = small_idx(size);
     block_t **list_head = &bins->small_bins[small_list_idx];
     remove_free_block(list_head, block);
 }
 
-static void large_bin_remove(block_t *block)
+/**
+ * @brief Removes a block from a large bin. Helper function to remove_block().
+ * 
+ * @param block 
+ */
+static void large_bin_remove(block_t *block, size_t size)
 {
-    size_t size = get_size(block);
     size_t large_list_idx = large_idx(size);
     block_t **list_head = &bins->large_bins[large_list_idx];
     remove_free_block(list_head, block);
 }
 
+/**
+ * @brief Removes a block from the correct bin.
+ * 
+ * @param block 
+ */
 static void remove_block(block_t *block)
 {
     size_t size = get_size(block);
     if (is_small(size))
     {
-        small_bin_remove(block);
-    }
-    else if (is_large(size))
-    {
-        large_bin_remove(block);
+        small_bin_remove(block, size);
     }
     else
     {
-        printf("Critical Error! Block is not small or large");
+        large_bin_remove(block, size);
     }
+
 }
 
+
+/* vvvvvvvvvvvvvvvvvvvvv 16 Byte Min-Block Size Functions vvvvvvvvvvvvvvvvvvvvvvv*/
+/**
+ * @brief Returns the value of the "has size 16" bit from a block's header
+ * 
+ * @param block 
+ */
 static bool get_sixteen(block_t *block)
 {
     return (block->header & sixteen_mask);
 }
 
+/**
+ * @brief Get the value of the "previous block has size 16" from a block's
+ *          header
+ * 
+ * @param block 
+ */
 static bool get_prev_sixteen(block_t *block)
 {
     return (block->header & prev_sixteen_mask);
 }
 
+/**
+ * @brief Overwrites the prev_sixteen bit of a block.
+ * 
+ * @param block 
+ * @param prev_sixteen 
+ */
 static void write_prev_sixteen(block_t *block, bool prev_sixteen)
 {
-    block->header = (block->header & ~prev_sixteen_mask) | (prev_sixteen << 3);
+    block->header = (block->header & ~prev_sixteen_mask) | (prev_sixteen << prev_sixteen_bit_offset);
 }
 
+/**
+ * @brief Overwrites the prev_sixteen bit of a block's next neightboring block.
+ * 
+ * @param block 
+ * @param prev_sixteen 
+ */
 static void write_prev_sixteen_of_next_block(block_t *block, bool prev_sixteen)
 {
     block_t *next_block = find_next(block);
     write_prev_sixteen(next_block, prev_sixteen);
 }
 
-// Set the 4th bit and clear the last 3 bits.
+/**
+ * @brief Returns the next pointer of a size 16 block.
+ *          
+ *          This is necessary b/c size 16 blocks mutate
+            the 4th bit for metadata and are structured
+            differently than normal blocks.
+ * 
+ * @param block 
+ * @return block_t* 
+ */
 static block_t *get_sixteen_next_ptr(block_t *block)
 {
     if ((block->header & size_mask) == 0)
@@ -1268,11 +1452,30 @@ static block_t *get_sixteen_next_ptr(block_t *block)
     return (block_t *)((block->header & size_mask) | prev_sixteen_mask);
 }
 
+/**
+ * @brief Returns the prev pointer of a size 16 block.
+ * 
+ *          This is necessary b/c size 16 are structured
+            differently than normal blocks.
+ * 
+ * @param block 
+ * @return block_t* 
+ */
 static block_t *get_sixteen_prev_ptr(block_t *block)
 {
     return block->next;
 }
 
+/**
+ * @brief Returns a block's next ptr.
+ *          
+ *          This is necessary b/c we have two different
+ *          types of blocks that access their next pointer
+ *          differently.
+ * 
+ * @param block 
+ * @return block_t* 
+ */
 static block_t *get_next_free_block(block_t *block)
 {
     if (get_sixteen(block))
@@ -1282,6 +1485,16 @@ static block_t *get_next_free_block(block_t *block)
     return block->next;
 }
 
+/**
+ * @brief Returns a block's prev ptr.
+ *          
+ *          This is necessary b/c we have two different
+ *          types of blocks that access their prev pointer
+ *          differently.
+ * 
+ * @param block 
+ * @return block_t* 
+ */
 static block_t *get_prev_free_block(block_t *block)
 {
     if (get_sixteen(block))
