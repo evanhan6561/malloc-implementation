@@ -109,7 +109,7 @@ static const word_t sixteen_mask = 0x4;
 static const word_t prev_sixteen_mask = 0x8;
 static const word_t size_mask = ~(word_t)0xF;
 
-#define NUM_SMALL_BINS 280
+#define NUM_SMALL_BINS 360
 #define NUM_LARGE_BINS 16
 
 static size_t MIN_SMALL_BIN_SIZE;
